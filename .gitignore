@@ -1,0 +1,24 @@
+# OS/editor noise
+.DS_Store
+*.asv
+*.autosave
+
+# Large/generated data artifacts
+data_mat/
+results/
+
+# Binary data/media artifacts (anywhere)
+*.mat
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Archives
+*.zip
+*.tar
+*.gz
