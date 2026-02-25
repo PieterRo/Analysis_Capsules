@@ -16,7 +16,7 @@ MinSigma = 15;                  % maximal signal of fitted curve
 MaxSigma = 75;                  % maximal signal of fitted curve
 SelectLocalSNR = 1;         % if set to 1, it will use the response in the object attention task, not the global SNR
 cfg = config();
-Dir = cfg.rootDir;
+Dir = cfg.repoRoot;
 StimDir = cfg.stimDir;
 cd(Dir);
 
@@ -29,16 +29,16 @@ cd(Dir);
 % end
 
 if Monkey == 1
-    m1 = matfile(fullfile(cfg.dataDir, 'Mr Nilson', 'ObjAtt_lines_normMUA.mat'));
-    m2 = matfile(fullfile(cfg.dataDir, 'Mr Nilson', 'ObjAtt_lines_MUA_trials.mat'));
+    m1 = matfile(fullfile(cfg.dataRoot, 'Mr Nilson', 'ObjAtt_lines_normMUA.mat'));
+    m2 = matfile(fullfile(cfg.dataRoot, 'Mr Nilson', 'ObjAtt_lines_MUA_trials.mat'));
     SNR = m1.SNR;
     [NChansGlob,NTrialsGlob,NTimesGlob] = size(m1, 'normMUA');
     ALLMAT = m2.ALLMAT;
     tb=m2.tb;
     ReadPerTrial = 1; % necessary because I can't load normMUA at once. 
 else
-    m1 = matfile(fullfile(cfg.dataDir, 'Figaro', 'ObjAtt_lines_normMUA.mat'));
-    m2 = matfile(fullfile(cfg.dataDir, 'Figaro', 'ObjAtt_lines_MUA_trials.mat'));
+    m1 = matfile(fullfile(cfg.dataRoot, 'Figaro', 'ObjAtt_lines_normMUA.mat'));
+    m2 = matfile(fullfile(cfg.dataRoot, 'Figaro', 'ObjAtt_lines_MUA_trials.mat'));
     SNR = m1.SNR;
     [NChansGlob,NTrialsGlob,NTimesGlob] = size(m1, 'normMUA');
     ALLMAT = m2.ALLMAT;

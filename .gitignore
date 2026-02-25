@@ -28,3 +28,6 @@ results/
 # MATLAB build artifacts
 slprj/
 codegen/
+
+# Local machine config
+config_local.m

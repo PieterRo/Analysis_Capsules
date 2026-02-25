@@ -18,7 +18,7 @@
 Monkey = 1; % 1 for Nilson, 2 for Figaro
 TabFile = "ObjAtt_lines_monkeyN_20220201_B1";  % made on that date
 cfg = config();
-Dir = cfg.rootDir;
+Dir = cfg.repoRoot;
 LogDir = cfg.logsDir;
 
 cd(Dir);
@@ -30,20 +30,20 @@ load(fullfile(LogDir, 'RTAB384.mat')); % load the RANDTAB information for each o
 % - the curve thickness RTAB384(stimNum, 7) and 
 % - the color of all curves RTAB384(stimNum, 8): If it is odd (1): colFig = green and colBack = purple.
 % now let us have a look at ALLMAT
-BmpDir = cfg.rootDir;
+BmpDir = cfg.repoRoot;
 StimDir = cfg.stimDir;
 
 if Monkey == 1
-    m1 = matfile(fullfile(cfg.dataDir, 'Mr Nilson', 'ObjAtt_lines_normMUA.mat'));
-    m2 = matfile(fullfile(cfg.dataDir, 'Mr Nilson', 'ObjAtt_lines_MUA_trials.mat'));
+    m1 = matfile(fullfile(cfg.dataRoot, 'Mr Nilson', 'ObjAtt_lines_normMUA.mat'));
+    m2 = matfile(fullfile(cfg.dataRoot, 'Mr Nilson', 'ObjAtt_lines_MUA_trials.mat'));
     SNR = m1.SNR;
     [NChansGlob,NTrialsGlob,NTimesGlob] = size(m1, 'normMUA');
     ALLMAT = m2.ALLMAT;
     tb=m2.tb;
     ReadPerTrial = 1; % necessary because I can't load normMUA at once. 
 else
-    m1 = matfile(fullfile(cfg.dataDir, 'Figaro', 'ObjAtt_lines_normMUA.mat'));
-    m2 = matfile(fullfile(cfg.dataDir, 'Figaro', 'ObjAtt_lines_MUA_trials.mat'));
+    m1 = matfile(fullfile(cfg.dataRoot, 'Figaro', 'ObjAtt_lines_normMUA.mat'));
+    m2 = matfile(fullfile(cfg.dataRoot, 'Figaro', 'ObjAtt_lines_MUA_trials.mat'));
     SNR = m1.SNR;
     [NChansGlob,NTrialsGlob,NTimesGlob] = size(m1, 'normMUA');
     ALLMAT = m2.ALLMAT;

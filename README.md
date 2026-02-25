@@ -183,6 +183,21 @@ Recommendation: Validate one analysis at a time when first setting up paths or u
 
 ---
 
+## Path Setup (New Machines)
+
+Create a local, untracked `config_local.m` in the repo root to define machine-specific paths:
+
+```matlab
+function cfg = config_local(cfg)
+cfg.dataRoot = '/path/to/data';
+cfg.extrasRoot = '/path/to/Extras';
+end
+```
+
+This file is ignored by git and should not be committed.
+
+---
+
 ## Reproducibility Notes
 
 * Avoid relying on variables from the base workspace.

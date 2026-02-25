@@ -53,20 +53,20 @@ cfg = config();
 
 % home
 
-cd(cfg.rootDir)
+cd(cfg.repoRoot)
 if Monkey == 1
-    m1 = matfile(fullfile(cfg.dataDir, 'Mr Nilson', 'ObjAtt_lines_normMUA.mat'));
+    m1 = matfile(fullfile(cfg.dataRoot, 'Mr Nilson', 'ObjAtt_lines_normMUA.mat'));
     SNR_Paolo = m1.SNR;
     [NChansGlob,NTrialsGlob,NTimesGlob] = size(m1, 'normMUA');
-    m2 = matfile(fullfile(cfg.dataDir, 'Mr Nilson', 'ObjAtt_lines_MUA_trials.mat'));
+    m2 = matfile(fullfile(cfg.dataRoot, 'Mr Nilson', 'ObjAtt_lines_MUA_trials.mat'));
     ALLMAT = m2.ALLMAT;
     tb=m2.tb;
     ReadPerTrial = 1; % necessary because I can't load normMUA at once. 
 else
-    m1 = matfile(fullfile(cfg.dataDir, 'Figaro', 'ObjAtt_lines_normMUA.mat'));
+    m1 = matfile(fullfile(cfg.dataRoot, 'Figaro', 'ObjAtt_lines_normMUA.mat'));
     SNR_Paolo = m1.SNR;
     [NChansGlob,NTrialsGlob,NTimesGlob] = size(m1, 'normMUA');
-    m2 = matfile(fullfile(cfg.dataDir, 'Figaro', 'ObjAtt_lines_MUA_trials.mat'));
+    m2 = matfile(fullfile(cfg.dataRoot, 'Figaro', 'ObjAtt_lines_MUA_trials.mat'));
     ALLMAT = m2.ALLMAT;
     tb=m2.tb;
     ReadPerTrial = 1; % necessary because I can't load normMUA at once. 

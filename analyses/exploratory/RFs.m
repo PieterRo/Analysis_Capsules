@@ -5,7 +5,7 @@
 
 Monkey=1; % (1=Nilson; 2= Figaro)
 cfg = config();
-cd(cfg.rootDir);
+cd(cfg.repoRoot);
 
 if Monkey  == 1     %     --- Region indices Nilson ---
     V1 = 1:512;
