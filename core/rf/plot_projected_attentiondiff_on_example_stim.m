@@ -41,16 +41,29 @@ if ~isfield(optsPlot,'bgColor'), optsPlot.bgColor = [0.5 0.5 0.5]; end
 if ~isfield(optsPlot,'cLow'), optsPlot.cLow = [0.62 0.62 0.62]; end
 if ~isfield(optsPlot,'cHigh'), optsPlot.cHigh = [0.85 0.05 0.05]; end
 if ~isfield(optsPlot,'projectionMode'), optsPlot.projectionMode = 'quartet_pooled'; end
+if ~isfield(optsPlot,'neighborN'), optsPlot.neighborN = 1; end
+if ~isfield(optsPlot,'neighborIdx'), optsPlot.neighborIdx = []; end
+if ~isfield(optsPlot,'alphaByValue'), optsPlot.alphaByValue = false; end
+if ~isfield(optsPlot,'alphaValueGamma'), optsPlot.alphaValueGamma = 2.5; end
+if ~isfield(optsPlot,'alphaValueMinScale'), optsPlot.alphaValueMinScale = 0.03; end
+if ~isfield(optsPlot,'alphaValueFloor'), optsPlot.alphaValueFloor = 0; end
+if ~isfield(optsPlot,'alphaFloorSoft'), optsPlot.alphaFloorSoft = 0.20; end
+if ~isfield(optsPlot,'hotScale'), optsPlot.hotScale = true; end
+if ~isfield(optsPlot,'colorHotMaxFactor'), optsPlot.colorHotMaxFactor = 3.0; end
+if ~isfield(optsPlot,'pixelSmoothSigma'), optsPlot.pixelSmoothSigma = 0; end
+if ~isfield(optsPlot,'pixelNeighborN'), optsPlot.pixelNeighborN = 0; end
 
 RTAB384 = optsPlot.RTAB384;
 siteRange = optsPlot.siteRange(:)';
+mode = lower(string(optsPlot.projectionMode));
 
 if stimID_example < 1 || stimID_example > numel(Tall_V1)
     error('stimID_example out of range.');
 end
 
 % ---- Safety check for effect magnitude fields ----
-if ~(isfield(OUT,'muT') && isfield(OUT,'muD'))
+needsSiteDelta = (mode == "site_pooled_template") || (mode == "all_stimuli");
+if needsSiteDelta && ~(isfield(OUT,'muT') && isfield(OUT,'muD'))
     fprintf('OUT is missing muT/muD. Available fields:\n');
     fn = fieldnames(OUT);
     disp(fn);
@@ -63,7 +76,7 @@ if ~(isfield(OUT,'muT') && isfield(OUT,'muD'))
         end
     end
     error(['Cannot compute TD magnitude safely for plotting. ' ...
-           'Expected per-site fields OUT.muT and OUT.muD for window 3.']);
+           'Expected per-site fields OUT.muT and OUT.muD.']);
 end
 
 if ~isfield(OUT,'pValueTD')
@@ -83,8 +96,12 @@ sigMaskAll = isfinite(OUT.pValueTD(:)) & (OUT.pValueTD(:) < optsPlot.pThresh);
 nSigSites = sum(sigMaskAll);
 fprintf('nSigSites = %d\n', nSigSites);
 
-% ---- Per-site effect ----
-deltaAll = OUT.muT(:) - OUT.muD(:);  % T - D
+% ---- Per-site effect (only for non-quartet modes) ----
+if needsSiteDelta
+    deltaAll = OUT.muT(:) - OUT.muD(:);  % T - D
+else
+    deltaAll = [];
+end
 
 % ---- Canonical geometry (same conventions as activity projection) ----
 W = 1024; H = 768;
@@ -117,7 +134,11 @@ valDistrAll  = [];
 
 siteGlobal = siteRange(:);
 sigMask = sigMaskAll(siteGlobal);
-delta = deltaAll(siteGlobal);
+if needsSiteDelta
+    delta = deltaAll(siteGlobal);
+else
+    delta = [];
+end
 
 requiredVars = ["assignment","overlap","along_GC","perp_signed_GC"];
 if ~isfield(Tall_V1(stimID_example),'T') || ~istable(Tall_V1(stimID_example).T)
@@ -128,7 +149,6 @@ if height(TtabEx) < max(siteRange) || any(~ismember(requiredVars, string(TtabEx.
     error('Tall_V1(%d).T lacks required rows/vars.', stimID_example);
 end
 
-mode = lower(string(optsPlot.projectionMode));
 if mode == "quartet_pooled"
     % Quartet-conditioned pooling:
     % - Hard-coded quartets per block of 8 stimuli:
@@ -136,107 +156,141 @@ if mode == "quartet_pooled"
     % - For each site and quartet, compute pooled T and D from selected time bin
     %   using Tall_V1 assignment/overlap and normalized response from Rdata/SNRnorm.
     % - Use sign of quartet delta to route each site-stim contribution to target/distractor.
-    if ~isfield(optsPlot,'Rdata') || ~isfield(optsPlot,'SNRnorm') || ~isfield(optsPlot,'timeIdx')
-        error(['projectionMode=quartet_pooled requires optsPlot.Rdata, ' ...
-               'optsPlot.SNRnorm, and optsPlot.timeIdx.']);
-    end
-    Rdata = optsPlot.Rdata;
-    SNRn = optsPlot.SNRnorm;
-    tb = optsPlot.timeIdx;
-    assert(isfield(Rdata,'meanAct') && isfield(Rdata,'nTrials'), ...
-        'optsPlot.Rdata must contain meanAct and nTrials.');
-    assert(size(Rdata.meanAct,2) == 384 && size(Rdata.meanAct,3) >= tb, ...
-        'Rdata.meanAct must be [nSites x 384 x nTime] with nTime >= optsPlot.timeIdx.');
-
-    % Build normalization constants
-    bAll = SNRn.muSpont(:);
-    topMat = [SNRn.muYellowEarly(:), SNRn.muYellowLate(:), SNRn.muPurpleEarly(:), SNRn.muPurpleLate(:)];
-    muTopAll = max(topMat, [], 2);
-    b = bAll(siteRange);
-    scale = muTopAll(siteRange) - b;
-    scale(~isfinite(scale) | scale <= 0) = NaN;
-
-    % Trials shape
-    nTrials = Rdata.nTrials;
-    if isvector(nTrials)
-        nTrials = nTrials(:)';  % 1x384
-        perSiteTrials = false;
-    else
-        perSiteTrials = true;
-    end
-
     % Quartet map
     nStim = 384;
     nBlocks = nStim / 8;
     nQuartets = nBlocks * 2;
-    stimToQuartet = zeros(1, nStim);
-    quartetMembers = zeros(nQuartets, 4);
-    q = 0;
-    for bIdx = 0:(nBlocks-1)
-        base = 8*bIdx;
-        q = q + 1;
-        quartetMembers(q,:) = base + [1 2 5 6];
-        stimToQuartet(base + [1 2 5 6]) = q;
-        q = q + 1;
-        quartetMembers(q,:) = base + [3 4 7 8];
-        stimToQuartet(base + [3 4 7 8]) = q;
+    if isfield(optsPlot,'stimToQuartet') && numel(optsPlot.stimToQuartet) == nStim
+        stimToQuartet = optsPlot.stimToQuartet(:)';
+    else
+        stimToQuartet = zeros(1, nStim);
+        q = 0;
+        for bIdx = 0:(nBlocks-1)
+            base = 8*bIdx;
+            q = q + 1;
+            stimToQuartet(base + [1 2 5 6]) = q;
+            q = q + 1;
+            stimToQuartet(base + [3 4 7 8]) = q;
+        end
     end
 
     % Per-site, per-quartet pooled delta
-    nSites = numel(siteRange);
-    deltaQ = nan(nSites, nQuartets);
-    requiredVarsQ = ["assignment","overlap"];
-    for qIdx = 1:nQuartets
-        stimsQ = quartetMembers(qIdx,:);
-        sumT = zeros(nSites,1); NT = zeros(nSites,1);
-        sumD = zeros(nSites,1); ND = zeros(nSites,1);
+    if isfield(optsPlot,'deltaQ') && ~isempty(optsPlot.deltaQ)
+        deltaQ = optsPlot.deltaQ;
+        if size(deltaQ,1) ~= numel(siteRange) || size(deltaQ,2) ~= nQuartets
+            error('optsPlot.deltaQ must be [numel(siteRange) x %d].', nQuartets);
+        end
+    else
+        if ~isfield(optsPlot,'Rdata') || ~isfield(optsPlot,'SNRnorm') || ~isfield(optsPlot,'timeIdx')
+            error(['projectionMode=quartet_pooled requires optsPlot.deltaQ OR ' ...
+                   '(optsPlot.Rdata, optsPlot.SNRnorm, optsPlot.timeIdx).']);
+        end
+        Rdata = optsPlot.Rdata;
+        SNRn = optsPlot.SNRnorm;
+        tb = optsPlot.timeIdx;
+        assert(isfield(Rdata,'meanAct') && isfield(Rdata,'nTrials'), ...
+            'optsPlot.Rdata must contain meanAct and nTrials.');
+        assert(size(Rdata.meanAct,2) == 384 && size(Rdata.meanAct,3) >= tb, ...
+            'Rdata.meanAct must be [nSites x 384 x nTime] with nTime >= optsPlot.timeIdx.');
 
-        for stimNum = stimsQ
-            if ~isfield(Tall_V1(stimNum),'T') || ~istable(Tall_V1(stimNum).T)
-                continue;
-            end
-            Tq = Tall_V1(stimNum).T;
-            if height(Tq) < max(siteRange) || any(~ismember(requiredVarsQ, string(Tq.Properties.VariableNames)))
-                continue;
-            end
+        bAll = SNRn.muSpont(:);
+        topMat = [SNRn.muYellowEarly(:), SNRn.muYellowLate(:), SNRn.muPurpleEarly(:), SNRn.muPurpleLate(:)];
+        muTopAll = max(topMat, [], 2);
+        b = bAll(siteRange);
+        scale = muTopAll(siteRange) - b;
+        scale(~isfinite(scale) | scale <= 0) = NaN;
 
-            asg = string(Tq.assignment(siteRange));
-            isT = (asg == "target");
-            isD = (asg == "distractor");
-            isBG = (asg == "background");
-            isOV = Tq.overlap(siteRange) ~= 0;
-
-            EX = squeeze(double(Rdata.meanAct(siteRange, stimNum, tb)));
-            EY = (EX - b) ./ scale;
-
-            if ~perSiteTrials
-                wAll = repmat(double(nTrials(stimNum)), nSites, 1);
-            else
-                wAll = double(nTrials(siteRange, stimNum));
-            end
-
-            good = isfinite(EY) & isfinite(wAll) & (wAll > 0) & ~isBG & ~isOV;
-
-            mT = good & isT;
-            if any(mT)
-                w = wAll(mT);
-                sumT(mT) = sumT(mT) + w .* EY(mT);
-                NT(mT) = NT(mT) + w;
-            end
-
-            mD = good & isD;
-            if any(mD)
-                w = wAll(mD);
-                sumD(mD) = sumD(mD) + w .* EY(mD);
-                ND(mD) = ND(mD) + w;
-            end
+        nTrials = Rdata.nTrials;
+        if isvector(nTrials)
+            nTrials = nTrials(:)';  % 1x384
+            perSiteTrials = false;
+        else
+            perSiteTrials = true;
         end
 
-        hasBoth = (NT > 0) & (ND > 0);
-        muTq = nan(nSites,1); muDq = nan(nSites,1);
-        muTq(hasBoth) = sumT(hasBoth) ./ NT(hasBoth);
-        muDq(hasBoth) = sumD(hasBoth) ./ ND(hasBoth);
-        deltaQ(:, qIdx) = muTq - muDq;
+        quartetMembers = zeros(nQuartets, 4);
+        q = 0;
+        for bIdx = 0:(nBlocks-1)
+            base = 8*bIdx;
+            q = q + 1;
+            quartetMembers(q,:) = base + [1 2 5 6];
+            q = q + 1;
+            quartetMembers(q,:) = base + [3 4 7 8];
+        end
+
+        nSites = numel(siteRange);
+        deltaQ = nan(nSites, nQuartets);
+        requiredVarsQ = ["assignment","overlap"];
+        for qIdx = 1:nQuartets
+            stimsQ = quartetMembers(qIdx,:);
+            sumT = zeros(nSites,1); NT = zeros(nSites,1);
+            sumD = zeros(nSites,1); ND = zeros(nSites,1);
+
+            for stimNum = stimsQ
+                if ~isfield(Tall_V1(stimNum),'T') || ~istable(Tall_V1(stimNum).T)
+                    continue;
+                end
+                Tq = Tall_V1(stimNum).T;
+                if height(Tq) < max(siteRange) || any(~ismember(requiredVarsQ, string(Tq.Properties.VariableNames)))
+                    continue;
+                end
+
+                asg = string(Tq.assignment(siteRange));
+                isT = (asg == "target");
+                isD = (asg == "distractor");
+                isBG = (asg == "background");
+                isOV = Tq.overlap(siteRange) ~= 0;
+
+                EX = squeeze(double(Rdata.meanAct(siteRange, stimNum, tb)));
+                EY = (EX - b) ./ scale;
+
+                if ~perSiteTrials
+                    wAll = repmat(double(nTrials(stimNum)), nSites, 1);
+                else
+                    wAll = double(nTrials(siteRange, stimNum));
+                end
+
+                good = isfinite(EY) & isfinite(wAll) & (wAll > 0) & ~isBG & ~isOV;
+
+                mT = good & isT;
+                if any(mT)
+                    w = wAll(mT);
+                    sumT(mT) = sumT(mT) + w .* EY(mT);
+                    NT(mT) = NT(mT) + w;
+                end
+
+                mD = good & isD;
+                if any(mD)
+                    w = wAll(mD);
+                    sumD(mD) = sumD(mD) + w .* EY(mD);
+                    ND(mD) = ND(mD) + w;
+                end
+            end
+
+            hasBoth = (NT > 0) & (ND > 0);
+            muTq = nan(nSites,1); muDq = nan(nSites,1);
+            muTq(hasBoth) = sumT(hasBoth) ./ NT(hasBoth);
+            muDq(hasBoth) = sumD(hasBoth) ./ ND(hasBoth);
+            deltaQ(:, qIdx) = muTq - muDq;
+        end
+    end
+
+    % Optional RF-center neighborhood smoothing across significant sites.
+    if optsPlot.neighborN > 1
+        if ~isempty(optsPlot.neighborIdx)
+            nbrIdx = optsPlot.neighborIdx;
+            if size(nbrIdx,1) ~= numel(siteRange)
+                error('optsPlot.neighborIdx must have size [numel(siteRange) x K].');
+            end
+        else
+            [rfX, rfY] = get_rf_centers(TtabEx, siteRange);
+            nbrIdx = compute_neighbor_idx(rfX, rfY, sigMask, optsPlot.neighborN);
+        end
+        [deltaQ, nShort] = smooth_deltaQ_neighbors(deltaQ, nbrIdx, optsPlot.neighborN);
+        if nShort > 0
+            fprintf(['quartet_pooled smoothing: %d site-quartet values used fewer than %d valid neighbors ' ...
+                     '(averaged over available neighbors).\n'], nShort, optsPlot.neighborN);
+        end
     end
 
     % Accumulate geometry across selected stimuli
@@ -416,6 +470,14 @@ fprintf('stim %d contributing assignments (distractor curve): %d\n', stimID_exam
 printStats('target', valTargetAll);
 printStats('distractor', valDistrAll);
 
+% Optional smoothing in image pixel space (post-affine projection).
+% Priority: explicit neighbor averaging; fallback to Gaussian smoothing.
+if optsPlot.pixelNeighborN > 1 && ~isempty(V)
+    V = smooth_values_by_pixel_neighbors(X, Y, V, optsPlot.pixelNeighborN);
+elseif optsPlot.pixelSmoothSigma > 0 && ~isempty(V)
+    V = smooth_values_in_pixel_space(X, Y, V, W, H, optsPlot.pixelSmoothSigma);
+end
+
 % ---- Robust color scaling (95th percentile of plotted positives) ----
 if ~isempty(optsPlot.cMaxFixed) && isfinite(optsPlot.cMaxFixed) && optsPlot.cMaxFixed > 0
     cMax = optsPlot.cMaxFixed;
@@ -431,8 +493,41 @@ else
     end
 end
 
-t = min(max(V ./ cMax, 0), 1);
-C = (1-t).*optsPlot.cLow + t.*optsPlot.cHigh;
+tRaw = V ./ cMax;
+t = min(max(tRaw, 0), 1);
+if optsPlot.hotScale
+    % cMax is a reference scale, not a hard max; allow hotter colors above cMax.
+    hotCap = max(1.01, optsPlot.colorHotMaxFactor);
+    tColor = min(max(tRaw, 0), hotCap);
+    tk = [0.00, 0.45, 0.80, 1.00, hotCap];
+    ck = [optsPlot.cLow;
+          0.85 0.05 0.05;
+          1.00 0.90 0.20;
+          1.00 0.95 0.45;
+          1.00 1.00 1.00];
+    C = zeros(numel(tColor), 3);
+    for j = 1:3
+        C(:,j) = interp1(tk, ck(:,j), tColor, 'linear', 'extrap');
+    end
+else
+    C = (1-t).*optsPlot.cLow + t.*optsPlot.cHigh;
+end
+if isempty(V)
+    alphaPoint = [];
+else
+    if isfinite(optsPlot.alphaValueFloor) && optsPlot.alphaValueFloor > 0
+        denom = max(cMax - optsPlot.alphaValueFloor, eps);
+        % Soft-thresholded ramp around alphaValueFloor (reduces hard "pop-in")
+        x = (V - optsPlot.alphaValueFloor) ./ denom;
+        s = max(optsPlot.alphaFloorSoft, eps);
+        u = 0.5 * (x + sqrt(x.^2 + s^2));  % smooth approx of max(0,x)
+        u = min(1, max(0, u));
+        alphaScale = max(optsPlot.alphaValueMinScale, u .^ optsPlot.alphaValueGamma);
+    else
+        alphaScale = max(optsPlot.alphaValueMinScale, t .^ optsPlot.alphaValueGamma);
+    end
+    alphaPoint = min(1, max(0, optsPlot.alpha * alphaScale));
+end
 
 % ---- Plot single panel ----
 fig = figure('Color',optsPlot.bgColor);
@@ -445,9 +540,26 @@ axis(ax,'ij');
 
 if ~isempty(X)
     hSc = scatter(ax, X, Y, optsPlot.markerSize, C, 'filled');
-    hSc.MarkerFaceAlpha = optsPlot.alpha;
-    if isprop(hSc,'MarkerEdgeAlpha')
-        hSc.MarkerEdgeAlpha = optsPlot.alpha;
+    hSc.MarkerEdgeColor = 'none';
+    if optsPlot.alphaByValue
+        try
+            hSc.MarkerFaceAlpha = 'flat';
+            hSc.AlphaData = alphaPoint;
+            hSc.AlphaDataMapping = 'none';
+            if isprop(hSc,'MarkerEdgeAlpha')
+                hSc.MarkerEdgeAlpha = 'flat';
+            end
+        catch
+            hSc.MarkerFaceAlpha = optsPlot.alpha;
+            if isprop(hSc,'MarkerEdgeAlpha')
+                hSc.MarkerEdgeAlpha = optsPlot.alpha;
+            end
+        end
+    else
+        hSc.MarkerFaceAlpha = optsPlot.alpha;
+        if isprop(hSc,'MarkerEdgeAlpha')
+            hSc.MarkerEdgeAlpha = optsPlot.alpha;
+        end
     end
 end
 
@@ -488,4 +600,139 @@ u = v / norm(v);
 w = t_other - s_px;
 w_perp = w - dot(w,u)*u;
 n = w_perp / norm(w_perp);
+end
+
+function [x, y] = get_rf_centers(Ttab, siteRange)
+vn = string(Ttab.Properties.VariableNames);
+
+if ismember("x_deg", vn) && ismember("y_deg", vn)
+    x = double(Ttab.x_deg(siteRange));
+    y = double(Ttab.y_deg(siteRange));
+    return;
+end
+if ismember("x", vn) && ismember("y", vn)
+    x = double(Ttab.x(siteRange));
+    y = double(Ttab.y(siteRange));
+    return;
+end
+if ismember("x_px", vn) && ismember("y_px", vn)
+    x = double(Ttab.x_px(siteRange));
+    y = double(Ttab.y_px(siteRange));
+    return;
+end
+
+error(['Could not find RF center coordinate columns in Tall_V1(stim).T. ' ...
+       'Expected one of: (x_deg,y_deg), (x,y), or (x_px,y_px).']);
+end
+
+function nbrIdx = compute_neighbor_idx(x, y, sigMask, neighborN)
+n = numel(x);
+nbrIdx = nan(n, neighborN);
+
+sigIdx = find(sigMask(:));
+if isempty(sigIdx)
+    return;
+end
+
+xs = x(sigIdx); ys = y(sigIdx);
+for i = 1:n
+    if ~isfinite(x(i)) || ~isfinite(y(i))
+        continue;
+    end
+    d2 = (xs - x(i)).^2 + (ys - y(i)).^2;
+    [~, ord] = sort(d2, 'ascend');
+    k = min(neighborN, numel(ord));
+    nbrIdx(i,1:k) = sigIdx(ord(1:k));
+end
+end
+
+function [deltaQ_s, nShort] = smooth_deltaQ_neighbors(deltaQ, nbrIdx, neighborN)
+[nSites, nQ] = size(deltaQ);
+deltaQ_s = nan(nSites, nQ);
+nShort = 0;
+for i = 1:nSites
+    nn = nbrIdx(i,:);
+    nn = nn(isfinite(nn));
+    if isempty(nn)
+        continue;
+    end
+    vals = deltaQ(nn, :);
+    goodCount = sum(isfinite(vals), 1);
+    mu = mean(vals, 1, 'omitnan');
+    nShort = nShort + nnz(goodCount < neighborN);
+    deltaQ_s(i,:) = mu;
+end
+end
+
+function V_s = smooth_values_in_pixel_space(X, Y, V, W, H, sigmaPx)
+V_s = V;
+if isempty(V) || ~isfinite(sigmaPx) || sigmaPx <= 0
+    return;
+end
+
+xi = round(X);
+yi = round(Y);
+valid = isfinite(xi) & isfinite(yi) & isfinite(V) & ...
+        (xi >= 1) & (xi <= W) & (yi >= 1) & (yi <= H);
+if ~any(valid)
+    return;
+end
+
+lin = sub2ind([H W], yi(valid), xi(valid));
+sumMap = reshape(accumarray(lin, V(valid), [H*W 1], @sum, 0), [H W]);
+cntMap = reshape(accumarray(lin, 1,       [H*W 1], @sum, 0), [H W]);
+
+rad = max(1, ceil(3*sigmaPx));
+kx = -rad:rad;
+g = exp(-0.5 * (kx./sigmaPx).^2);
+g = g / sum(g);
+
+sumBlur = conv2(conv2(sumMap, g, 'same'), g', 'same');
+cntBlur = conv2(conv2(cntMap, g, 'same'), g', 'same');
+
+den = cntBlur(lin);
+num = sumBlur(lin);
+vNew = num ./ max(den, eps);
+V_s(valid) = vNew;
+end
+
+function V_s = smooth_values_by_pixel_neighbors(X, Y, V, neighborN)
+V_s = V;
+if isempty(V) || ~isfinite(neighborN) || neighborN <= 1
+    return;
+end
+
+xy = [double(X(:)), double(Y(:))];
+v = double(V(:));
+valid = all(isfinite(xy), 2) & isfinite(v);
+if ~any(valid)
+    return;
+end
+
+xyv = xy(valid, :);
+vv = v(valid);
+k = min(round(neighborN), size(xyv,1));
+if k <= 1
+    return;
+end
+
+if exist('knnsearch', 'file') == 2
+    idx = knnsearch(xyv, xyv, 'K', k);
+    vNew = mean(vv(idx), 2, 'omitnan');
+else
+    % Fallback without Statistics Toolbox: chunked full-distance nearest neighbors.
+    n = size(xyv,1);
+    idx = zeros(n, k);
+    blk = 500;
+    for i0 = 1:blk:n
+        i1 = min(n, i0 + blk - 1);
+        q = xyv(i0:i1, :);
+        d2 = (q(:,1) - xyv(:,1)').^2 + (q(:,2) - xyv(:,2)').^2;
+        [~, ord] = sort(d2, 2, 'ascend');
+        idx(i0:i1, :) = ord(:, 1:k);
+    end
+    vNew = mean(vv(idx), 2, 'omitnan');
+end
+
+V_s(valid) = vNew;
 end

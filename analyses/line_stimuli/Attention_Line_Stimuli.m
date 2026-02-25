@@ -5,7 +5,7 @@
 RUN_HISTOGRAM = false;
 RUN_QC = false;
 RUN_STILLS = true;
-RUN_MOVIE = true;
+RUN_MOVIE = false;
 
 %% Central parameters
 P = struct();
@@ -16,12 +16,24 @@ P.pThresh = 0.05;                    % hard significance rule
 P.siteRange = 1:512;
 P.stimIDExample = 38;
 P.idxClip = 2;                       % histogram clipping
-P.plotMarkerSize = 5;
-P.plotAlpha = 0.50;                  % constant across windows
+P.plotAlpha = 0.55;                  % constant across windows
 P.plotRobustPct = 95;
 P.plotBgColor = [0.5 0.5 0.5];
 P.plotCLow = [0.55 0.55 0.55];       % weak effects blend into background
 P.plotCHigh = [0.85 0.05 0.05];
+P.neighborN = 1;                      % RF-center smoothing (set 1 to disable)
+P.pixelNeighborN = 20;               % image-space KNN averaging after affine projection
+P.pixelSmoothSigma = 0;               % optional Gaussian fallback in image space
+P.alphaValueGamma = 3.2;
+P.alphaValueMinScale = 0.05;         % keep weak points slightly visible
+P.alphaFloorSoft = 0.45;             % soften transition around alpha floor
+P.preStimCalibratedAlpha = true;
+P.preStimPercentile = 99.9;          % fewer pre-stim points near full opacity
+P.plotMarkerSize = 8;
+P.alphaByValue = true;
+P.hotScale = true;
+P.colorHotMaxFactor = 4.0;           % allow values > cMax to become hotter
+
 
 %% Required context
 cfg = config();
@@ -173,8 +185,8 @@ if RUN_QC
     end
 end
 
-%% Shared visualization scale (across 10-ms and pre-stim still frames)
-if RUN_STILLS
+%% Shared visualization normalization (used by stills and movie)
+if RUN_STILLS || RUN_MOVIE
     d10 = OUT10.muT - OUT10.muD;
     dpre = OUTpre.muT - OUTpre.muD;
     sigMask = isfinite(OUT3.pValueTD) & (OUT3.pValueTD < P.pThresh);
@@ -192,7 +204,23 @@ if RUN_STILLS
             cShared = 1;
         end
     end
-    fprintf('Using shared color scale cMax=%.6g for still frames.\n', cShared);
+    fprintf('Using shared normalization anchors: cMax=%.6g', cShared);
+    alphaFloorShared = 0;
+    if P.preStimCalibratedAlpha
+        preVals = abs(dpre(sigMask));
+        preVals = preVals(isfinite(preVals) & preVals > 0);
+        if ~isempty(preVals)
+            alphaFloorShared = prctile(preVals, P.preStimPercentile);
+            if ~isfinite(alphaFloorShared) || alphaFloorShared < 0
+                alphaFloorShared = 0;
+            end
+        end
+    end
+    fprintf(', alphaFloor=%.6g\n', alphaFloorShared);
+end
+
+%% Still plots
+if RUN_STILLS
 
     optsPlot = struct();
     optsPlot.RTAB384 = RTAB384;
@@ -205,12 +233,23 @@ if RUN_STILLS
     optsPlot.bgColor = P.plotBgColor;
     optsPlot.cLow = P.plotCLow;
     optsPlot.cHigh = P.plotCHigh;
+    optsPlot.hotScale = P.hotScale;
+    optsPlot.colorHotMaxFactor = P.colorHotMaxFactor;
     optsPlot.projectionMode = 'quartet_pooled';
     optsPlot.Rdata = R_resp;
     optsPlot.SNRnorm = SNRnorm;
+    optsPlot.neighborN = P.neighborN;
+    optsPlot.pixelNeighborN = P.pixelNeighborN;
+    optsPlot.pixelSmoothSigma = P.pixelSmoothSigma;
+    optsPlot.alphaByValue = P.alphaByValue;
+    optsPlot.alphaValueGamma = P.alphaValueGamma;
+    optsPlot.alphaValueMinScale = P.alphaValueMinScale;
+    optsPlot.alphaFloorSoft = P.alphaFloorSoft;
+    optsPlot.alphaValueFloor = alphaFloorShared;
 
     % ===== SMALL WINDOW FRAME PLOT (~10 ms) =====
     optsPlot.timeIdx = timeIdx10;
+    optsPlot.alpha = P.plotAlpha;
     hSmall = plot_projected_attentiondiff_on_example_stim( ...
         P.stimIDExample, OUT10plot, Tall_V1, ALLCOORDS, optsPlot);
     figure(hSmall.fig);
@@ -221,6 +260,7 @@ if RUN_STILLS
 
     % ===== PRE-STIM (SPONTANEOUS) FRAME PLOT =====
     optsPlot.timeIdx = timeIdxPre;
+    optsPlot.alpha = P.plotAlpha;  % keep alpha fixed across frames
     hPre = plot_projected_attentiondiff_on_example_stim( ...
         P.stimIDExample, OUTprePlot, Tall_V1, ALLCOORDS, optsPlot);
     figure(hPre.fig);
@@ -236,5 +276,25 @@ end
 if RUN_MOVIE
     outMovie = fullfile(cfg.resultsDir, 'V1_attentiondiff_movie_10ms.mp4');
     make_attention_movie_wrapper_safe( ...
-        outMovie, Tall_V1, ALLCOORDS, RTAB384, P.stimIDExample, R_resp, SNRnorm, OUT3);
+        outMovie, Tall_V1, ALLCOORDS, RTAB384, P.stimIDExample, R_resp, SNRnorm, OUT3, ...
+        'pThresh', P.pThresh, ...
+        'alpha', P.plotAlpha, ...
+        'markerSize', P.plotMarkerSize, ...
+        'robustPct', P.plotRobustPct, ...
+        'bgColor', P.plotBgColor, ...
+        'cLow', P.plotCLow, ...
+        'cHigh', P.plotCHigh, ...
+        'neighborN', P.neighborN, ...
+        'pixelNeighborN', P.pixelNeighborN, ...
+        'pixelSmoothSigma', P.pixelSmoothSigma, ...
+        'alphaByValue', P.alphaByValue, ...
+        'alphaValueGamma', P.alphaValueGamma, ...
+        'alphaValueMinScale', P.alphaValueMinScale, ...
+        'alphaFloorSoft', P.alphaFloorSoft, ...
+        'hotScale', P.hotScale, ...
+        'colorHotMaxFactor', P.colorHotMaxFactor, ...
+        'preStimCalibratedAlpha', P.preStimCalibratedAlpha, ...
+        'preStimPercentile', P.preStimPercentile, ...
+        'cMaxFixed', cShared, ...
+        'alphaValueFloorFixed', alphaFloorShared);
 end
