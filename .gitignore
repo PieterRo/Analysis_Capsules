@@ -2,6 +2,8 @@
 .DS_Store
 *.asv
 *.autosave
+*.m~
+~$*.docx
 
 # Large/generated data artifacts
 data_mat/
@@ -22,3 +24,7 @@ results/
 *.zip
 *.tar
 *.gz
+
+# MATLAB build artifacts
+slprj/
+codegen/
