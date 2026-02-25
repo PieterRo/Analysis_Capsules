@@ -200,6 +200,10 @@ for tb = 1:nFrames
     optsPlot.bgColor = optsMovie.bgColor;
     optsPlot.cLow = optsMovie.cLow;
     optsPlot.cHigh = optsMovie.cHigh;
+    optsPlot.projectionMode = 'quartet_pooled';
+    optsPlot.Rdata = R_resp;
+    optsPlot.SNRnorm = SNRnorm;
+    optsPlot.timeIdx = tb;
 
     h = plot_projected_attentiondiff_on_example_stim( ...
         stimID_example, OUT_byFrame{tb}, Tall_V1, ALLCOORDS, optsPlot);

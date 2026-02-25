@@ -19,7 +19,7 @@ cfg = config(); %#ok<NASGU>
 % LINE STIMULI
 run(fullfile(rootDir, 'analyses', 'line_stimuli', 'Line_Stimuli.m'));
 run(fullfile(rootDir, 'analyses', 'line_stimuli', 'Analyse_Line_Stimuli.m'));
-run(fullfile(rootDir, 'analyses', 'line_stimuli', 'Attention_Line_Stimuli.m'));
+% run(fullfile(rootDir, 'analyses', 'line_stimuli', 'Attention_Line_Stimuli.m'));
 
 % LATENCY
 % run(fullfile(rootDir, 'analyses', 'latency', 'Latency_analysis_SVM.m'));

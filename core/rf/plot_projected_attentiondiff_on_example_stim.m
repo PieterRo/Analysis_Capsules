@@ -40,6 +40,7 @@ if ~isfield(optsPlot,'cMaxFixed'), optsPlot.cMaxFixed = []; end
 if ~isfield(optsPlot,'bgColor'), optsPlot.bgColor = [0.5 0.5 0.5]; end
 if ~isfield(optsPlot,'cLow'), optsPlot.cLow = [0.62 0.62 0.62]; end
 if ~isfield(optsPlot,'cHigh'), optsPlot.cHigh = [0.85 0.05 0.05]; end
+if ~isfield(optsPlot,'projectionMode'), optsPlot.projectionMode = 'quartet_pooled'; end
 
 RTAB384 = optsPlot.RTAB384;
 siteRange = optsPlot.siteRange(:)';
@@ -105,14 +106,7 @@ nD = perpTowardOther(s_px, tD, tT);
 
 widthEx = double(RTAB384(stimID_example,7));
 
-% ---- Stimulus set to project ----
-if isempty(optsPlot.stimIdx)
-    stimList = 1:numel(Tall_V1);
-else
-    stimList = optsPlot.stimIdx(:)';
-end
-
-% ---- Project coordinates using all selected stimuli into example frame ----
+% ---- Project coordinates ----
 X = [];
 Y = [];
 V = [];
@@ -126,47 +120,215 @@ sigMask = sigMaskAll(siteGlobal);
 delta = deltaAll(siteGlobal);
 
 requiredVars = ["assignment","overlap","along_GC","perp_signed_GC"];
-for stimNum = stimList
-    if stimNum < 1 || stimNum > numel(Tall_V1)
-        continue;
+if ~isfield(Tall_V1(stimID_example),'T') || ~istable(Tall_V1(stimID_example).T)
+    error('Tall_V1(%d).T missing/invalid.', stimID_example);
+end
+TtabEx = Tall_V1(stimID_example).T;
+if height(TtabEx) < max(siteRange) || any(~ismember(requiredVars, string(TtabEx.Properties.VariableNames)))
+    error('Tall_V1(%d).T lacks required rows/vars.', stimID_example);
+end
+
+mode = lower(string(optsPlot.projectionMode));
+if mode == "quartet_pooled"
+    % Quartet-conditioned pooling:
+    % - Hard-coded quartets per block of 8 stimuli:
+    %   [1 2 5 6] and [3 4 7 8] (+ block offset)
+    % - For each site and quartet, compute pooled T and D from selected time bin
+    %   using Tall_V1 assignment/overlap and normalized response from Rdata/SNRnorm.
+    % - Use sign of quartet delta to route each site-stim contribution to target/distractor.
+    if ~isfield(optsPlot,'Rdata') || ~isfield(optsPlot,'SNRnorm') || ~isfield(optsPlot,'timeIdx')
+        error(['projectionMode=quartet_pooled requires optsPlot.Rdata, ' ...
+               'optsPlot.SNRnorm, and optsPlot.timeIdx.']);
     end
-    if ~isfield(Tall_V1(stimNum),'T') || ~istable(Tall_V1(stimNum).T)
-        continue;
-    end
-    Ttab = Tall_V1(stimNum).T;
-    if height(Ttab) < max(siteRange)
-        continue;
-    end
-    if any(~ismember(requiredVars, string(Ttab.Properties.VariableNames)))
-        continue;
+    Rdata = optsPlot.Rdata;
+    SNRn = optsPlot.SNRnorm;
+    tb = optsPlot.timeIdx;
+    assert(isfield(Rdata,'meanAct') && isfield(Rdata,'nTrials'), ...
+        'optsPlot.Rdata must contain meanAct and nTrials.');
+    assert(size(Rdata.meanAct,2) == 384 && size(Rdata.meanAct,3) >= tb, ...
+        'Rdata.meanAct must be [nSites x 384 x nTime] with nTime >= optsPlot.timeIdx.');
+
+    % Build normalization constants
+    bAll = SNRn.muSpont(:);
+    topMat = [SNRn.muYellowEarly(:), SNRn.muYellowLate(:), SNRn.muPurpleEarly(:), SNRn.muPurpleLate(:)];
+    muTopAll = max(topMat, [], 2);
+    b = bAll(siteRange);
+    scale = muTopAll(siteRange) - b;
+    scale(~isfinite(scale) | scale <= 0) = NaN;
+
+    % Trials shape
+    nTrials = Rdata.nTrials;
+    if isvector(nTrials)
+        nTrials = nTrials(:)';  % 1x384
+        perSiteTrials = false;
+    else
+        perSiteTrials = true;
     end
 
-    assign = string(Ttab.assignment(siteRange));
-    isTargetAssign = (assign == "target");
-    isDistrAssign  = (assign == "distractor");
-    isOverlap = Ttab.overlap(siteRange) ~= 0;
+    % Quartet map
+    nStim = 384;
+    nBlocks = nStim / 8;
+    nQuartets = nBlocks * 2;
+    stimToQuartet = zeros(1, nStim);
+    quartetMembers = zeros(nQuartets, 4);
+    q = 0;
+    for bIdx = 0:(nBlocks-1)
+        base = 8*bIdx;
+        q = q + 1;
+        quartetMembers(q,:) = base + [1 2 5 6];
+        stimToQuartet(base + [1 2 5 6]) = q;
+        q = q + 1;
+        quartetMembers(q,:) = base + [3 4 7 8];
+        stimToQuartet(base + [3 4 7 8]) = q;
+    end
 
-    validBase = sigMask & ~isOverlap & (isTargetAssign | isDistrAssign) & isfinite(delta);
+    % Per-site, per-quartet pooled delta
+    nSites = numel(siteRange);
+    deltaQ = nan(nSites, nQuartets);
+    requiredVarsQ = ["assignment","overlap"];
+    for qIdx = 1:nQuartets
+        stimsQ = quartetMembers(qIdx,:);
+        sumT = zeros(nSites,1); NT = zeros(nSites,1);
+        sumD = zeros(nSites,1); ND = zeros(nSites,1);
 
-    % Route sign by assignment (red-only positive magnitude)
+        for stimNum = stimsQ
+            if ~isfield(Tall_V1(stimNum),'T') || ~istable(Tall_V1(stimNum).T)
+                continue;
+            end
+            Tq = Tall_V1(stimNum).T;
+            if height(Tq) < max(siteRange) || any(~ismember(requiredVarsQ, string(Tq.Properties.VariableNames)))
+                continue;
+            end
+
+            asg = string(Tq.assignment(siteRange));
+            isT = (asg == "target");
+            isD = (asg == "distractor");
+            isBG = (asg == "background");
+            isOV = Tq.overlap(siteRange) ~= 0;
+
+            EX = squeeze(double(Rdata.meanAct(siteRange, stimNum, tb)));
+            EY = (EX - b) ./ scale;
+
+            if ~perSiteTrials
+                wAll = repmat(double(nTrials(stimNum)), nSites, 1);
+            else
+                wAll = double(nTrials(siteRange, stimNum));
+            end
+
+            good = isfinite(EY) & isfinite(wAll) & (wAll > 0) & ~isBG & ~isOV;
+
+            mT = good & isT;
+            if any(mT)
+                w = wAll(mT);
+                sumT(mT) = sumT(mT) + w .* EY(mT);
+                NT(mT) = NT(mT) + w;
+            end
+
+            mD = good & isD;
+            if any(mD)
+                w = wAll(mD);
+                sumD(mD) = sumD(mD) + w .* EY(mD);
+                ND(mD) = ND(mD) + w;
+            end
+        end
+
+        hasBoth = (NT > 0) & (ND > 0);
+        muTq = nan(nSites,1); muDq = nan(nSites,1);
+        muTq(hasBoth) = sumT(hasBoth) ./ NT(hasBoth);
+        muDq(hasBoth) = sumD(hasBoth) ./ ND(hasBoth);
+        deltaQ(:, qIdx) = muTq - muDq;
+    end
+
+    % Accumulate geometry across selected stimuli
+    if isempty(optsPlot.stimIdx)
+        stimList = 1:numel(Tall_V1);
+    else
+        stimList = optsPlot.stimIdx(:)';
+    end
+    for stimNum = stimList
+        if stimNum < 1 || stimNum > numel(Tall_V1)
+            continue;
+        end
+        qIdx = stimToQuartet(stimNum);
+        if qIdx < 1
+            continue;
+        end
+        if ~isfield(Tall_V1(stimNum),'T') || ~istable(Tall_V1(stimNum).T)
+            continue;
+        end
+        Ttab = Tall_V1(stimNum).T;
+        if height(Ttab) < max(siteRange) || any(~ismember(requiredVars, string(Ttab.Properties.VariableNames)))
+            continue;
+        end
+
+        assign = string(Ttab.assignment(siteRange));
+        isTargetAssign = (assign == "target");
+        isDistrAssign  = (assign == "distractor");
+        isOverlap = Ttab.overlap(siteRange) ~= 0;
+        dHere = deltaQ(:, qIdx);
+
+        validBase = sigMask & ~isOverlap & (isTargetAssign | isDistrAssign) & isfinite(dHere);
+
+        valTarget = zeros(size(siteGlobal));
+        valDistr  = zeros(size(siteGlobal));
+        idxT = validBase & isTargetAssign;
+        idxD = validBase & isDistrAssign;
+        valTarget(idxT) = max(0,  dHere(idxT));
+        valDistr(idxD)  = max(0, -dHere(idxD));
+
+        plotT = idxT & (valTarget > 0);
+        plotD = idxD & (valDistr > 0);
+
+        nTargetContrib = nTargetContrib + nnz(plotT);
+        nDistrContrib  = nDistrContrib + nnz(plotD);
+        valTargetAll = [valTargetAll; valTarget(plotT)]; %#ok<AGROW>
+        valDistrAll  = [valDistrAll;  valDistr(plotD)]; %#ok<AGROW>
+
+        if any(plotT)
+            along = double(Ttab.along_GC(siteRange(plotT))) * widthEx;
+            perp  = double(Ttab.perp_signed_GC(siteRange(plotT))) * widthEx;
+            p = s_px + along.*uT + perp.*nT;
+            X = [X; p(:,1)]; %#ok<AGROW>
+            Y = [Y; p(:,2)]; %#ok<AGROW>
+            V = [V; valTarget(plotT)]; %#ok<AGROW>
+        end
+
+        if any(plotD)
+            along = double(Ttab.along_GC(siteRange(plotD))) * widthEx;
+            perp  = double(Ttab.perp_signed_GC(siteRange(plotD))) * widthEx;
+            p = s_px + along.*uD + perp.*nD;
+            X = [X; p(:,1)]; %#ok<AGROW>
+            Y = [Y; p(:,2)]; %#ok<AGROW>
+            V = [V; valDistr(plotD)]; %#ok<AGROW>
+        end
+    end
+
+elseif mode == "site_pooled_template"
+    % New default:
+    % - one pooled T-D effect per site (from OUT)
+    % - one template location per site (stimID_example geometry)
+    % - sign routes to target arm (T>D) or mirrored distractor arm (D>T)
+    assignEx = string(TtabEx.assignment(siteRange));
+    isCurveEx = (assignEx == "target") | (assignEx == "distractor");
+    isOverlapEx = TtabEx.overlap(siteRange) ~= 0;
+    validBase = sigMask & isCurveEx & ~isOverlapEx & isfinite(delta);
+
     valTarget = zeros(size(siteGlobal));
     valDistr  = zeros(size(siteGlobal));
-    idxT = validBase & isTargetAssign;
-    idxD = validBase & isDistrAssign;
-    valTarget(idxT) = max(0,  delta(idxT));
-    valDistr(idxD)  = max(0, -delta(idxD));
+    valTarget(validBase) = max(0,  delta(validBase));
+    valDistr(validBase)  = max(0, -delta(validBase));
 
-    plotT = idxT & (valTarget > 0);
-    plotD = idxD & (valDistr > 0);
+    plotT = validBase & (valTarget > 0);
+    plotD = validBase & (valDistr > 0);
 
-    nTargetContrib = nTargetContrib + nnz(plotT);
-    nDistrContrib  = nDistrContrib + nnz(plotD);
-    valTargetAll = [valTargetAll; valTarget(plotT)]; %#ok<AGROW>
-    valDistrAll  = [valDistrAll;  valDistr(plotD)]; %#ok<AGROW>
+    nTargetContrib = nnz(plotT);
+    nDistrContrib  = nnz(plotD);
+    valTargetAll = valTarget(plotT);
+    valDistrAll  = valDistr(plotD);
 
     if any(plotT)
-        along = double(Ttab.along_GC(siteRange(plotT))) * widthEx;
-        perp  = double(Ttab.perp_signed_GC(siteRange(plotT))) * widthEx;
+        along = double(TtabEx.along_GC(siteRange(plotT))) * widthEx;
+        perp  = double(TtabEx.perp_signed_GC(siteRange(plotT))) * widthEx;
         p = s_px + along.*uT + perp.*nT;
         X = [X; p(:,1)]; %#ok<AGROW>
         Y = [Y; p(:,2)]; %#ok<AGROW>
@@ -174,13 +336,79 @@ for stimNum = stimList
     end
 
     if any(plotD)
-        along = double(Ttab.along_GC(siteRange(plotD))) * widthEx;
-        perp  = double(Ttab.perp_signed_GC(siteRange(plotD))) * widthEx;
+        along = double(TtabEx.along_GC(siteRange(plotD))) * widthEx;
+        perp  = double(TtabEx.perp_signed_GC(siteRange(plotD))) * widthEx;
         p = s_px + along.*uD + perp.*nD;
         X = [X; p(:,1)]; %#ok<AGROW>
         Y = [Y; p(:,2)]; %#ok<AGROW>
         V = [V; valDistr(plotD)]; %#ok<AGROW>
     end
+
+elseif mode == "all_stimuli"
+    % Legacy behavior: accumulate geometry across selected stimuli.
+    if isempty(optsPlot.stimIdx)
+        stimList = 1:numel(Tall_V1);
+    else
+        stimList = optsPlot.stimIdx(:)';
+    end
+
+    for stimNum = stimList
+        if stimNum < 1 || stimNum > numel(Tall_V1)
+            continue;
+        end
+        if ~isfield(Tall_V1(stimNum),'T') || ~istable(Tall_V1(stimNum).T)
+            continue;
+        end
+        Ttab = Tall_V1(stimNum).T;
+        if height(Ttab) < max(siteRange)
+            continue;
+        end
+        if any(~ismember(requiredVars, string(Ttab.Properties.VariableNames)))
+            continue;
+        end
+
+        assign = string(Ttab.assignment(siteRange));
+        isTargetAssign = (assign == "target");
+        isDistrAssign  = (assign == "distractor");
+        isOverlap = Ttab.overlap(siteRange) ~= 0;
+
+        validBase = sigMask & ~isOverlap & (isTargetAssign | isDistrAssign) & isfinite(delta);
+
+        valTarget = zeros(size(siteGlobal));
+        valDistr  = zeros(size(siteGlobal));
+        idxT = validBase & isTargetAssign;
+        idxD = validBase & isDistrAssign;
+        valTarget(idxT) = max(0,  delta(idxT));
+        valDistr(idxD)  = max(0, -delta(idxD));
+
+        plotT = idxT & (valTarget > 0);
+        plotD = idxD & (valDistr > 0);
+
+        nTargetContrib = nTargetContrib + nnz(plotT);
+        nDistrContrib  = nDistrContrib + nnz(plotD);
+        valTargetAll = [valTargetAll; valTarget(plotT)]; %#ok<AGROW>
+        valDistrAll  = [valDistrAll;  valDistr(plotD)]; %#ok<AGROW>
+
+        if any(plotT)
+            along = double(Ttab.along_GC(siteRange(plotT))) * widthEx;
+            perp  = double(Ttab.perp_signed_GC(siteRange(plotT))) * widthEx;
+            p = s_px + along.*uT + perp.*nT;
+            X = [X; p(:,1)]; %#ok<AGROW>
+            Y = [Y; p(:,2)]; %#ok<AGROW>
+            V = [V; valTarget(plotT)]; %#ok<AGROW>
+        end
+
+        if any(plotD)
+            along = double(Ttab.along_GC(siteRange(plotD))) * widthEx;
+            perp  = double(Ttab.perp_signed_GC(siteRange(plotD))) * widthEx;
+            p = s_px + along.*uD + perp.*nD;
+            X = [X; p(:,1)]; %#ok<AGROW>
+            Y = [Y; p(:,2)]; %#ok<AGROW>
+            V = [V; valDistr(plotD)]; %#ok<AGROW>
+        end
+    end
+else
+    error('Unknown optsPlot.projectionMode: %s', optsPlot.projectionMode);
 end
 
 fprintf('stim %d contributing assignments (target curve): %d\n', stimID_example, nTargetContrib);

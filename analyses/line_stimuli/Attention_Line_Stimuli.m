@@ -2,10 +2,10 @@
 % Attention modulation summary, still-frame diagnostics, and optional movie wrapper.
 
 %% Run switches
-RUN_HISTOGRAM = true;
-RUN_QC = true;
+RUN_HISTOGRAM = false;
+RUN_QC = false;
 RUN_STILLS = true;
-RUN_MOVIE = false;
+RUN_MOVIE = true;
 
 %% Central parameters
 P = struct();
@@ -205,8 +205,12 @@ if RUN_STILLS
     optsPlot.bgColor = P.plotBgColor;
     optsPlot.cLow = P.plotCLow;
     optsPlot.cHigh = P.plotCHigh;
+    optsPlot.projectionMode = 'quartet_pooled';
+    optsPlot.Rdata = R_resp;
+    optsPlot.SNRnorm = SNRnorm;
 
     % ===== SMALL WINDOW FRAME PLOT (~10 ms) =====
+    optsPlot.timeIdx = timeIdx10;
     hSmall = plot_projected_attentiondiff_on_example_stim( ...
         P.stimIDExample, OUT10plot, Tall_V1, ALLCOORDS, optsPlot);
     figure(hSmall.fig);
@@ -216,6 +220,7 @@ if RUN_STILLS
     fprintf('Using 10 ms bin %d: [%d %d] ms\n', timeIdx10, win10(1), win10(2));
 
     % ===== PRE-STIM (SPONTANEOUS) FRAME PLOT =====
+    optsPlot.timeIdx = timeIdxPre;
     hPre = plot_projected_attentiondiff_on_example_stim( ...
         P.stimIDExample, OUTprePlot, Tall_V1, ALLCOORDS, optsPlot);
     figure(hPre.fig);
