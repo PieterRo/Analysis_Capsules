@@ -44,6 +44,9 @@ function make_attention_movie_wrapper_safe(outFile, ...
 %   'preStimPercentile' (99.7) % percentile used to set alpha floor
 %   'cMaxFixed'        ([])   % if set, use this shared color reference for all frames
 %   'alphaValueFloorFixed' ([]) % if set, use this fixed alpha floor for all frames
+%   'useSiteScale'      (false) % use per-site late-phase scaling
+%   'siteScaleLateWindow' ([300 500]) % ms window used for per-site scaling
+%   'siteScaleStat'     ('mean_plus_sd') % statistic for per-site scaling
 
 % ---- Defaults ----
 optsMovie = struct();
@@ -74,6 +77,9 @@ optsMovie.preStimCalibratedAlpha = true;
 optsMovie.preStimPercentile = 99.7;
 optsMovie.cMaxFixed = [];
 optsMovie.alphaValueFloorFixed = [];
+optsMovie.useSiteScale = false;
+optsMovie.siteScaleLateWindow = [300 500];
+optsMovie.siteScaleStat = 'mean_plus_sd';
 
 % ---- Parse name/value ----
 if mod(numel(varargin),2) ~= 0
@@ -167,6 +173,7 @@ deltaQ_byFrame = cell(nFrames,1);
 deltaAbs = [];
 frameStrength = nan(nFrames,1);
 preStimVals = [];
+siteScale = [];
 tp = tic;
 for tb = 1:nFrames
     deltaQ = compute_deltaQ_quartet(tb, R_resp, Tall_V1, SNRnorm, siteRange, quartetMembers, optsMovie.excludeOverlap);
@@ -196,6 +203,17 @@ for tb = 1:nFrames
     end
 end
 
+% ---- Optional per-site scaling from late-phase windows ----
+if optsMovie.useSiteScale
+    try
+        siteScale = compute_site_scale_late(R_resp, Tall_V1, SNRnorm, siteRange, ...
+            optsMovie.siteScaleLateWindow, optsMovie.excludeOverlap, optsMovie.siteScaleStat);
+    catch ME
+        warning('Site-scale computation failed: %s', ME.message);
+        siteScale = [];
+    end
+end
+
 if ~isempty(optsMovie.cMaxFixed) && isfinite(optsMovie.cMaxFixed) && optsMovie.cMaxFixed > 0
     cShared = optsMovie.cMaxFixed;
 else
@@ -214,6 +232,10 @@ end
 
 if optsMovie.verbose
     fprintf('Shared color scale cMax: %.6g\n', cShared);
+end
+if optsMovie.useSiteScale && ~isempty(siteScale) && optsMovie.verbose
+    fprintf('Using per-site scaling from late window [%d %d] ms (%s).\n', ...
+        optsMovie.siteScaleLateWindow(1), optsMovie.siteScaleLateWindow(2), optsMovie.siteScaleStat);
 end
 
 if ~isempty(optsMovie.alphaValueFloorFixed) && isfinite(optsMovie.alphaValueFloorFixed) && optsMovie.alphaValueFloorFixed >= 0
@@ -274,7 +296,13 @@ for tb = 1:nFrames
     optsPlot.alpha = optsMovie.alpha;
     optsPlot.robustPct = optsMovie.robustPct;
     optsPlot.stimIdx = optsMovie.stimIdx;
-    optsPlot.cMaxFixed = cShared;
+    if optsMovie.useSiteScale && ~isempty(siteScale)
+        optsPlot.cMaxFixed = 1;
+        optsPlot.siteScale = siteScale;
+    else
+        optsPlot.cMaxFixed = cShared;
+        optsPlot.siteScale = [];
+    end
     optsPlot.bgColor = optsMovie.bgColor;
     optsPlot.cLow = optsMovie.cLow;
     optsPlot.cHigh = optsMovie.cHigh;
@@ -394,84 +422,5 @@ for i = 1:n
     [~, ord] = sort(d2, 'ascend');
     k = min(neighborN, numel(ord));
     nbrIdx(i,1:k) = sigIdx(ord(1:k));
-end
-end
-
-function deltaQ = compute_deltaQ_quartet(tb, Rdata, Tall_V1, SNRn, siteRange, quartetMembers, excludeOverlap)
-nSites = numel(siteRange);
-nQuartets = size(quartetMembers, 1);
-
-bAll = SNRn.muSpont(:);
-topMat = [SNRn.muYellowEarly(:), SNRn.muYellowLate(:), SNRn.muPurpleEarly(:), SNRn.muPurpleLate(:)];
-muTopAll = max(topMat, [], 2);
-b = bAll(siteRange);
-scale = muTopAll(siteRange) - b;
-scale(~isfinite(scale) | scale <= 0) = NaN;
-
-nTrials = Rdata.nTrials;
-if isvector(nTrials)
-    nTrials = nTrials(:)';  % 1x384
-    perSiteTrials = false;
-else
-    perSiteTrials = true;
-end
-
-requiredVarsQ = ["assignment","overlap"];
-deltaQ = nan(nSites, nQuartets);
-for qIdx = 1:nQuartets
-    stimsQ = quartetMembers(qIdx,:);
-    sumT = zeros(nSites,1); NT = zeros(nSites,1);
-    sumD = zeros(nSites,1); ND = zeros(nSites,1);
-
-    for stimNum = stimsQ
-        if ~isfield(Tall_V1(stimNum),'T') || ~istable(Tall_V1(stimNum).T)
-            continue;
-        end
-        Tq = Tall_V1(stimNum).T;
-        if height(Tq) < max(siteRange) || any(~ismember(requiredVarsQ, string(Tq.Properties.VariableNames)))
-            continue;
-        end
-
-        asg = string(Tq.assignment(siteRange));
-        isT = (asg == "target");
-        isD = (asg == "distractor");
-        isBG = (asg == "background");
-        isOV = Tq.overlap(siteRange) ~= 0;
-
-        EX = squeeze(double(Rdata.meanAct(siteRange, stimNum, tb)));
-        EY = (EX - b) ./ scale;
-
-        if ~perSiteTrials
-            wAll = repmat(double(nTrials(stimNum)), nSites, 1);
-        else
-            wAll = double(nTrials(siteRange, stimNum));
-        end
-
-        if excludeOverlap
-            good = isfinite(EY) & isfinite(wAll) & (wAll > 0) & ~isBG & ~isOV;
-        else
-            good = isfinite(EY) & isfinite(wAll) & (wAll > 0) & ~isBG;
-        end
-
-        mT = good & isT;
-        if any(mT)
-            w = wAll(mT);
-            sumT(mT) = sumT(mT) + w .* EY(mT);
-            NT(mT) = NT(mT) + w;
-        end
-
-        mD = good & isD;
-        if any(mD)
-            w = wAll(mD);
-            sumD(mD) = sumD(mD) + w .* EY(mD);
-            ND(mD) = ND(mD) + w;
-        end
-    end
-
-    hasBoth = (NT > 0) & (ND > 0);
-    muTq = nan(nSites,1); muDq = nan(nSites,1);
-    muTq(hasBoth) = sumT(hasBoth) ./ NT(hasBoth);
-    muDq(hasBoth) = sumD(hasBoth) ./ ND(hasBoth);
-    deltaQ(:, qIdx) = muTq - muDq;
 end
 end

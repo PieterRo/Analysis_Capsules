@@ -52,6 +52,7 @@ if ~isfield(optsPlot,'hotScale'), optsPlot.hotScale = true; end
 if ~isfield(optsPlot,'colorHotMaxFactor'), optsPlot.colorHotMaxFactor = 3.0; end
 if ~isfield(optsPlot,'pixelSmoothSigma'), optsPlot.pixelSmoothSigma = 0; end
 if ~isfield(optsPlot,'pixelNeighborN'), optsPlot.pixelNeighborN = 0; end
+if ~isfield(optsPlot,'siteScale'), optsPlot.siteScale = []; end
 
 RTAB384 = optsPlot.RTAB384;
 siteRange = optsPlot.siteRange(:)';
@@ -127,6 +128,7 @@ widthEx = double(RTAB384(stimID_example,7));
 X = [];
 Y = [];
 V = [];
+S = [];
 nTargetContrib = 0;
 nDistrContrib  = 0;
 valTargetAll = [];
@@ -345,6 +347,7 @@ if mode == "quartet_pooled"
             X = [X; p(:,1)]; %#ok<AGROW>
             Y = [Y; p(:,2)]; %#ok<AGROW>
             V = [V; valTarget(plotT)]; %#ok<AGROW>
+            S = [S; siteRange(plotT(:)).']; %#ok<AGROW>
         end
 
         if any(plotD)
@@ -354,6 +357,7 @@ if mode == "quartet_pooled"
             X = [X; p(:,1)]; %#ok<AGROW>
             Y = [Y; p(:,2)]; %#ok<AGROW>
             V = [V; valDistr(plotD)]; %#ok<AGROW>
+            S = [S; siteRange(plotD(:)).']; %#ok<AGROW>
         end
     end
 
@@ -380,23 +384,25 @@ elseif mode == "site_pooled_template"
     valTargetAll = valTarget(plotT);
     valDistrAll  = valDistr(plotD);
 
-    if any(plotT)
-        along = double(TtabEx.along_GC(siteRange(plotT))) * widthEx;
-        perp  = double(TtabEx.perp_signed_GC(siteRange(plotT))) * widthEx;
-        p = s_px + along.*uT + perp.*nT;
-        X = [X; p(:,1)]; %#ok<AGROW>
-        Y = [Y; p(:,2)]; %#ok<AGROW>
-        V = [V; valTarget(plotT)]; %#ok<AGROW>
-    end
+        if any(plotT)
+            along = double(TtabEx.along_GC(siteRange(plotT))) * widthEx;
+            perp  = double(TtabEx.perp_signed_GC(siteRange(plotT))) * widthEx;
+            p = s_px + along.*uT + perp.*nT;
+            X = [X; p(:,1)]; %#ok<AGROW>
+            Y = [Y; p(:,2)]; %#ok<AGROW>
+            V = [V; valTarget(plotT)]; %#ok<AGROW>
+            S = [S; siteRange(plotT(:)).']; %#ok<AGROW>
+        end
 
-    if any(plotD)
-        along = double(TtabEx.along_GC(siteRange(plotD))) * widthEx;
-        perp  = double(TtabEx.perp_signed_GC(siteRange(plotD))) * widthEx;
-        p = s_px + along.*uD + perp.*nD;
-        X = [X; p(:,1)]; %#ok<AGROW>
-        Y = [Y; p(:,2)]; %#ok<AGROW>
-        V = [V; valDistr(plotD)]; %#ok<AGROW>
-    end
+        if any(plotD)
+            along = double(TtabEx.along_GC(siteRange(plotD))) * widthEx;
+            perp  = double(TtabEx.perp_signed_GC(siteRange(plotD))) * widthEx;
+            p = s_px + along.*uD + perp.*nD;
+            X = [X; p(:,1)]; %#ok<AGROW>
+            Y = [Y; p(:,2)]; %#ok<AGROW>
+            V = [V; valDistr(plotD)]; %#ok<AGROW>
+            S = [S; siteRange(plotD(:)).']; %#ok<AGROW>
+        end
 
 elseif mode == "all_stimuli"
     % Legacy behavior: accumulate geometry across selected stimuli.
@@ -450,6 +456,7 @@ elseif mode == "all_stimuli"
             X = [X; p(:,1)]; %#ok<AGROW>
             Y = [Y; p(:,2)]; %#ok<AGROW>
             V = [V; valTarget(plotT)]; %#ok<AGROW>
+            S = [S; siteRange(plotT(:)).']; %#ok<AGROW>
         end
 
         if any(plotD)
@@ -459,6 +466,7 @@ elseif mode == "all_stimuli"
             X = [X; p(:,1)]; %#ok<AGROW>
             Y = [Y; p(:,2)]; %#ok<AGROW>
             V = [V; valDistr(plotD)]; %#ok<AGROW>
+            S = [S; siteRange(plotD(:)).']; %#ok<AGROW>
         end
     end
 else
@@ -469,6 +477,18 @@ fprintf('stim %d contributing assignments (target curve): %d\n', stimID_example,
 fprintf('stim %d contributing assignments (distractor curve): %d\n', stimID_example, nDistrContrib);
 printStats('target', valTargetAll);
 printStats('distractor', valDistrAll);
+
+% ---- Optional per-site scaling (late-phase reference) ----
+if ~isempty(optsPlot.siteScale) && ~isempty(V)
+    siteScale = optsPlot.siteScale(:);
+    if numel(siteScale) < max(siteRange)
+        error('optsPlot.siteScale must have at least max(siteRange) elements.');
+    end
+    scaleV = siteScale(S);
+    goodScale = isfinite(scaleV) & scaleV > 0;
+    V(~goodScale) = NaN;
+    V(goodScale) = V(goodScale) ./ scaleV(goodScale);
+end
 
 % Optional smoothing in image pixel space (post-affine projection).
 % Priority: explicit neighbor averaging; fallback to Gaussian smoothing.

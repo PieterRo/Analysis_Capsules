@@ -22,17 +22,21 @@ P.plotBgColor = [0.5 0.5 0.5];
 P.plotCLow = [0.55 0.55 0.55];       % weak effects blend into background
 P.plotCHigh = [0.85 0.05 0.05];
 P.neighborN = 1;                      % RF-center smoothing (set 1 to disable)
-P.pixelNeighborN = 20;               % image-space KNN averaging after affine projection
+P.pixelNeighborN = 50;               % image-space KNN averaging after affine projection
 P.pixelSmoothSigma = 0;               % optional Gaussian fallback in image space
-P.alphaValueGamma = 3.2;
-P.alphaValueMinScale = 0.05;         % keep weak points slightly visible
-P.alphaFloorSoft = 0.45;             % soften transition around alpha floor
+P.alphaValueGamma = 4.0;
+P.alphaValueMinScale = 0.01;         % keep weak points slightly visible
+P.alphaFloorSoft = 0.20;             % soften transition around alpha floor
 P.preStimCalibratedAlpha = true;
 P.preStimPercentile = 99.9;          % fewer pre-stim points near full opacity
 P.plotMarkerSize = 8;
 P.alphaByValue = true;
 P.hotScale = true;
 P.colorHotMaxFactor = 4.0;           % allow values > cMax to become hotter
+P.useSiteScale = true;               % per-site late-phase scaling
+P.siteScaleLateWindow = [300 500];   % ms, used to build per-site scale
+P.siteScaleStat = 'mean_plus_sd';    % per-site scale from late-phase values
+P.siteScaleMin = 1e-6;
 
 
 %% Required context
@@ -186,36 +190,66 @@ if RUN_QC
     end
 end
 
+%% Optional per-site late-phase scaling
+siteScale = [];
+if RUN_STILLS && P.useSiteScale
+    siteScale = compute_site_scale_late(R_resp, Tall_V1, SNRnorm, P.siteRange, ...
+        P.siteScaleLateWindow, true, P.siteScaleStat);
+    if ~isempty(siteScale)
+        bad = ~isfinite(siteScale) | siteScale <= 0;
+        siteScale(bad) = NaN;
+        siteScale = max(siteScale, P.siteScaleMin);
+    end
+end
+
 %% Shared visualization normalization (used by stills and movie)
 if RUN_STILLS || RUN_MOVIE
     d10 = OUT10.muT - OUT10.muD;
     dpre = OUTpre.muT - OUTpre.muD;
     sigMask = isfinite(OUT3.pValueTD) & (OUT3.pValueTD < P.pThresh);
-    poolVals = [abs(d10(sigMask)); abs(dpre(sigMask))];
-    poolVals = poolVals(isfinite(poolVals) & poolVals > 0);
-
-    if isempty(poolVals)
-        cShared = 1;
-    else
-        cShared = prctile(poolVals, P.plotRobustPct);
-        if ~isfinite(cShared) || cShared <= 0
-            cShared = max(poolVals);
-        end
-        if ~isfinite(cShared) || cShared <= 0
-            cShared = 1;
-        end
-    end
-    fprintf('Using shared normalization anchors: cMax=%.6g', cShared);
     alphaFloorShared = 0;
-    if P.preStimCalibratedAlpha
-        preVals = abs(dpre(sigMask));
-        preVals = preVals(isfinite(preVals) & preVals > 0);
-        if ~isempty(preVals)
-            alphaFloorShared = prctile(preVals, P.preStimPercentile);
-            if ~isfinite(alphaFloorShared) || alphaFloorShared < 0
-                alphaFloorShared = 0;
+    if P.useSiteScale && ~isempty(siteScale)
+        cShared = 1;
+        if P.preStimCalibratedAlpha
+            preVals = abs(dpre(sigMask));
+            preVals = preVals(isfinite(preVals) & preVals > 0);
+            s = siteScale(P.siteRange(sigMask));
+            good = isfinite(s) & s > 0;
+            preVals = preVals(good) ./ s(good);
+            if ~isempty(preVals)
+                alphaFloorShared = prctile(preVals, P.preStimPercentile);
+                if ~isfinite(alphaFloorShared) || alphaFloorShared < 0
+                    alphaFloorShared = 0;
+                end
             end
         end
+        fprintf('Using per-site late-phase scaling: cMax=%.6g', cShared);
+    else
+        poolVals = [abs(d10(sigMask)); abs(dpre(sigMask))];
+        poolVals = poolVals(isfinite(poolVals) & poolVals > 0);
+
+        if isempty(poolVals)
+            cShared = 1;
+        else
+            cShared = prctile(poolVals, P.plotRobustPct);
+            if ~isfinite(cShared) || cShared <= 0
+                cShared = max(poolVals);
+            end
+            if ~isfinite(cShared) || cShared <= 0
+                cShared = 1;
+            end
+        end
+        if P.preStimCalibratedAlpha
+            preVals = abs(dpre(sigMask));
+            preVals = preVals(isfinite(preVals) & preVals > 0);
+            if ~isempty(preVals)
+                alphaFloorShared = prctile(preVals, P.preStimPercentile);
+                if ~isfinite(alphaFloorShared) || alphaFloorShared < 0
+                    alphaFloorShared = 0;
+                end
+            end
+        end
+        fprintf('Using shared normalization anchors: cMax=%.6g', cShared);
     end
     fprintf(', alphaFloor=%.6g\n', alphaFloorShared);
 end
@@ -247,6 +281,7 @@ if RUN_STILLS
     optsPlot.alphaValueMinScale = P.alphaValueMinScale;
     optsPlot.alphaFloorSoft = P.alphaFloorSoft;
     optsPlot.alphaValueFloor = alphaFloorShared;
+    optsPlot.siteScale = siteScale;
 
     % ===== SMALL WINDOW FRAME PLOT (~10 ms) =====
     optsPlot.timeIdx = timeIdx10;
@@ -297,5 +332,8 @@ if RUN_MOVIE
         'preStimCalibratedAlpha', P.preStimCalibratedAlpha, ...
         'preStimPercentile', P.preStimPercentile, ...
         'cMaxFixed', cShared, ...
-        'alphaValueFloorFixed', alphaFloorShared);
+        'alphaValueFloorFixed', alphaFloorShared, ...
+        'useSiteScale', P.useSiteScale, ...
+        'siteScaleLateWindow', P.siteScaleLateWindow, ...
+        'siteScaleStat', P.siteScaleStat);
 end
