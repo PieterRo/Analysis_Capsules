@@ -73,6 +73,7 @@ else
     meta.timeIdx = opts3.timeIdx;
     meta.excludeOverlap = opts3.excludeOverlap;
     meta.note = 'Use OUT.pValueTD from this file as fixed significance mask.';
+    OUT = OUT3; %#ok<NASGU>
     save(outFile, 'OUT', 'meta', '-v7.3');
     fprintf('Computed and saved baseline OUT to: %s\n', outFile);
 end
