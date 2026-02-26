@@ -2,13 +2,14 @@
 % Attention modulation summary, still-frame diagnostics, and optional movie wrapper.
 
 %% Run switches
+RUN_ATTENTION_PIPELINE = true;
 RUN_HISTOGRAM = false;
 RUN_QC = false;
 RUN_POST_AFFINE_VALUES = false;
 RUN_PREP_ANCHOR_KNN = false;
 RUN_PREP_NOISE_SIGNAL = false;
 RUN_STILLS = false;
-RUN_MOVIE = true;
+RUN_MOVIE = false;
 
 %% Central parameters
 P = struct();
@@ -43,16 +44,16 @@ P.useSiteScale = true;               % per-site late-phase scaling
 P.siteScaleLateWindow = [300 500];   % ms, used to build per-site scale
 P.siteScaleStat = 'mean_plus_sd';    % per-site scale from late-phase values
 P.siteScaleMin = 1e-6;
-P.prepK = 30;                        % K for global post-affine KNN averaging
+P.prepK = 200;                       % K for global post-affine KNN averaging
 P.prepNPick = 5;                     % number of anchor combinations for diagnostics
-P.prepKList = [1 10 20 30 50 80];    % K sweep for noise/signal prep
+P.prepKList = [1 10 30 50 80 200];   % K sweep for noise/signal prep
 P.preEndMs = 0;                      % pre bins: end <= this time
 P.postStartMs = 300;                 % post bins: start >= this time
-P.preQuantilePct = 95;               % threshold from pre-stim |value| quantile
+P.preQuantilePct = 99;               % threshold from pre-stim |value| quantile
 P.alphaFloorPct = 80;                % suggested alpha floor from pre-stim
 P.cMaxPostPct = 95;                  % suggested cMax from post-stim
 P.stillRunConsistencyCheck = false;  % expensive global KNN check; disable for speed
-P.timeLabelRef = 'start';            % 'start' keeps stimulus onset aligned at 0 ms
+P.timeLabelRef = 'center';           % show mid-point of time window in label
 P.stimOnsetMs = 0;                   % stimulus becomes visible from this bin start (ms)
 
 
@@ -80,6 +81,19 @@ SNRnorm = S.SNR;
 
 saveTag = 'OUT_attention_modulation_3bin_timeIdx3';
 outFile = fullfile(cfg.resultsDir, [saveTag '.mat']);
+outValuesFile = fullfile(cfg.resultsDir, sprintf('post_affine_delta_points_allbins_stim%d.mat', P.stimIDExample));
+prepNoiseFile = fullfile(cfg.resultsDir, sprintf('knn_noise_signal_prep_stim%d.mat', P.stimIDExample));
+
+% Optional pipeline: only compute missing prerequisites, then render movie.
+if RUN_ATTENTION_PIPELINE
+    RUN_POST_AFFINE_VALUES = (exist(outValuesFile, 'file') ~= 2);
+    RUN_PREP_NOISE_SIGNAL = (exist(prepNoiseFile, 'file') ~= 2);
+    RUN_MOVIE = true;
+    RUN_PREP_ANCHOR_KNN = false;
+    RUN_STILLS = false;
+    RUN_HISTOGRAM = false;
+    RUN_QC = false;
+end
 
 if exist(outFile, 'file')
     S = load(outFile, 'OUT');
@@ -204,7 +218,6 @@ if RUN_QC
 end
 
 %% Optional export of post-affine signed T-D values for all bins
-outValuesFile = fullfile(cfg.resultsDir, sprintf('post_affine_delta_points_allbins_stim%d.mat', P.stimIDExample));
 if RUN_POST_AFFINE_VALUES
     siteRangeVals = P.siteRange(:)';
     sigMaskVals = isfinite(OUT3.pValueTD(siteRangeVals)) & (OUT3.pValueTD(siteRangeVals) < P.pThresh);
@@ -263,7 +276,6 @@ if RUN_PREP_NOISE_SIGNAL
         end
     end
 
-    prepNoiseFile = fullfile(cfg.resultsDir, sprintf('knn_noise_signal_prep_stim%d.mat', P.stimIDExample));
     PREP_NOISE = analyze_knn_noise_signal_thresholds( ...
         OUT_postAffine, Tall_V1, ...
         'KList', P.prepKList, ...
@@ -302,7 +314,6 @@ if RUN_STILLS
         ['OUT_postAffine.bins.stream missing. Re-run RUN_POST_AFFINE_VALUES with the ' ...
          'updated compute_projected_delta_points_allbins.m']);
 
-    prepNoiseFile = fullfile(cfg.resultsDir, sprintf('knn_noise_signal_prep_stim%d.mat', P.stimIDExample));
     assert(exist(prepNoiseFile, 'file') == 2, ...
         'Noise/signal prep file missing: %s. Run RUN_PREP_NOISE_SIGNAL first.', prepNoiseFile);
     Sns = load(prepNoiseFile);

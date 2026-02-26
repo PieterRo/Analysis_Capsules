@@ -191,6 +191,7 @@ Create a local, untracked `config_local.m` in the repo root to define machine-sp
 function cfg = config_local(cfg)
 cfg.dataRoot = '/path/to/data';
 cfg.extrasRoot = '/path/to/Extras';
+cfg.resultsRoot = '/path/to/Dropbox';
 end
 ```
 

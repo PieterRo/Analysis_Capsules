@@ -21,6 +21,7 @@ p.addParameter('enforceK', true, @(x) islogical(x) && isscalar(x));
 p.addParameter('timeWindow', [], @(x) isempty(x) || (isnumeric(x) && numel(x)==2));
 p.addParameter('timeLabelRef', 'center', @(x) ischar(x) || isstring(x));
 p.addParameter('showStimulus', true, @(x) islogical(x) && isscalar(x));
+p.addParameter('printCounts', false, @(x) islogical(x) && isscalar(x));
 p.parse(varargin{:});
 opt = p.Results;
 
@@ -143,6 +144,12 @@ h.cMax = cMax;
 h.threshold = opt.alphaFullAt;
 h.fracAboveThreshold = mean(V > opt.alphaFullAt);
 h.showStimulus = opt.showStimulus;
+h.nPoints = numel(x);
+
+if opt.printCounts
+    fprintf('Post-affine frame points: %d (threshold=%.6g, >thr=%.2f%%)\n', ...
+        h.nPoints, opt.alphaFullAt, 100*h.fracAboveThreshold);
+end
 
 end
 

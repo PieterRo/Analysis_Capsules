@@ -14,6 +14,7 @@ else
          'function cfg = config_local(cfg)\n' ...
          'cfg.dataRoot = ''/path/to/data'';\n' ...
          'cfg.extrasRoot = ''/path/to/Extras'';\n' ...
+         'cfg.resultsRoot = ''/path/to/Dropbox'';\n' ...
          'end']);
 end
 
@@ -43,7 +44,8 @@ end
 cfg.matDir = fullfile(cfg.matRoot, 'data_mat');
 
 if ~isfield(cfg, 'resultsRoot') || isempty(cfg.resultsRoot)
-    cfg.resultsRoot = cfg.repoRoot;
+    error('config:ResultsRootMissing', ...
+        'config_local.m must set cfg.resultsRoot to your Dropbox root.');
 end
 cfg.resultsDir = fullfile(cfg.resultsRoot, 'results');
 
