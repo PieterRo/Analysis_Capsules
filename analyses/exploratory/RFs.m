@@ -11,13 +11,15 @@ if Monkey  == 1     %     --- Region indices Nilson ---
     V1 = 1:512;
     V4 = 513:768;
     IT = 769:1024;
-    load(fullfile(cfg.matDir, 'THINGS_RF1s_N.mat'));
+    rfFile = resolve_rf_file(cfg, 'THINGS_RF1s_N.mat', 'Mr Nilson');
+    load(rfFile);
     MonkeyName="N";
 else%                   --- Region indices Figaro ---
     V1 = 1:512;
     IT = 513:832;
     V4 = 833:1024;
-    load(fullfile(cfg.matDir, 'THINGS_RF1s_F.mat'));
+    rfFile = resolve_rf_file(cfg, 'THINGS_RF1s_F.mat', 'Figaro');
+    load(rfFile);
     MonkeyName="F";
 end
 
@@ -148,3 +150,22 @@ for ii = 1:numel(idx)
 end
 end
 
+function rfPath = resolve_rf_file(cfg, fileName, monkeySubdir)
+% Prefer repo-local data_mat, but allow legacy location under dataRoot.
+candidates = { ...
+    fullfile(cfg.matDir, fileName), ...
+    fullfile(cfg.dataRoot, monkeySubdir, fileName) ...
+};
+
+rfPath = '';
+for i = 1:numel(candidates)
+    if exist(candidates{i}, 'file') == 2
+        rfPath = candidates{i};
+        return;
+    end
+end
+
+error('RFs:MissingRFFile', ...
+    ['Could not find %s. Checked:\n - %s\n - %s'], ...
+    fileName, candidates{1}, candidates{2});
+end

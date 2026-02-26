@@ -50,9 +50,12 @@ if ~isfield(optsPlot,'alphaValueFloor'), optsPlot.alphaValueFloor = 0; end
 if ~isfield(optsPlot,'alphaFloorSoft'), optsPlot.alphaFloorSoft = 0.20; end
 if ~isfield(optsPlot,'hotScale'), optsPlot.hotScale = true; end
 if ~isfield(optsPlot,'colorHotMaxFactor'), optsPlot.colorHotMaxFactor = 3.0; end
+if ~isfield(optsPlot,'colorRedAt'), optsPlot.colorRedAt = []; end
 if ~isfield(optsPlot,'pixelSmoothSigma'), optsPlot.pixelSmoothSigma = 0; end
 if ~isfield(optsPlot,'pixelNeighborN'), optsPlot.pixelNeighborN = 0; end
 if ~isfield(optsPlot,'siteScale'), optsPlot.siteScale = []; end
+if ~isfield(optsPlot,'alphaFullAt'), optsPlot.alphaFullAt = []; end
+if ~isfield(optsPlot,'valueFloor'), optsPlot.valueFloor = 0; end
 
 RTAB384 = optsPlot.RTAB384;
 siteRange = optsPlot.siteRange(:)';
@@ -129,6 +132,7 @@ X = [];
 Y = [];
 V = [];
 S = [];
+G = []; % 1=target-contribution stream, 2=distractor-contribution stream
 nTargetContrib = 0;
 nDistrContrib  = 0;
 valTargetAll = [];
@@ -348,6 +352,7 @@ if mode == "quartet_pooled"
             Y = [Y; p(:,2)]; %#ok<AGROW>
             V = [V; valTarget(plotT)]; %#ok<AGROW>
             S = [S; siteRange(plotT(:)).']; %#ok<AGROW>
+            G = [G; ones(nnz(plotT),1)]; %#ok<AGROW>
         end
 
         if any(plotD)
@@ -358,6 +363,7 @@ if mode == "quartet_pooled"
             Y = [Y; p(:,2)]; %#ok<AGROW>
             V = [V; valDistr(plotD)]; %#ok<AGROW>
             S = [S; siteRange(plotD(:)).']; %#ok<AGROW>
+            G = [G; 2*ones(nnz(plotD),1)]; %#ok<AGROW>
         end
     end
 
@@ -392,6 +398,7 @@ elseif mode == "site_pooled_template"
             Y = [Y; p(:,2)]; %#ok<AGROW>
             V = [V; valTarget(plotT)]; %#ok<AGROW>
             S = [S; siteRange(plotT(:)).']; %#ok<AGROW>
+            G = [G; ones(nnz(plotT),1)]; %#ok<AGROW>
         end
 
         if any(plotD)
@@ -402,6 +409,7 @@ elseif mode == "site_pooled_template"
             Y = [Y; p(:,2)]; %#ok<AGROW>
             V = [V; valDistr(plotD)]; %#ok<AGROW>
             S = [S; siteRange(plotD(:)).']; %#ok<AGROW>
+            G = [G; 2*ones(nnz(plotD),1)]; %#ok<AGROW>
         end
 
 elseif mode == "all_stimuli"
@@ -457,6 +465,7 @@ elseif mode == "all_stimuli"
             Y = [Y; p(:,2)]; %#ok<AGROW>
             V = [V; valTarget(plotT)]; %#ok<AGROW>
             S = [S; siteRange(plotT(:)).']; %#ok<AGROW>
+            G = [G; ones(nnz(plotT),1)]; %#ok<AGROW>
         end
 
         if any(plotD)
@@ -467,6 +476,7 @@ elseif mode == "all_stimuli"
             Y = [Y; p(:,2)]; %#ok<AGROW>
             V = [V; valDistr(plotD)]; %#ok<AGROW>
             S = [S; siteRange(plotD(:)).']; %#ok<AGROW>
+            G = [G; 2*ones(nnz(plotD),1)]; %#ok<AGROW>
         end
     end
 else
@@ -493,58 +503,89 @@ end
 % Optional smoothing in image pixel space (post-affine projection).
 % Priority: explicit neighbor averaging; fallback to Gaussian smoothing.
 if optsPlot.pixelNeighborN > 1 && ~isempty(V)
-    V = smooth_values_by_pixel_neighbors(X, Y, V, optsPlot.pixelNeighborN);
+    V = smooth_values_by_pixel_neighbors_grouped(X, Y, V, G, optsPlot.pixelNeighborN);
 elseif optsPlot.pixelSmoothSigma > 0 && ~isempty(V)
     V = smooth_values_in_pixel_space(X, Y, V, W, H, optsPlot.pixelSmoothSigma);
+end
+
+% Subtract a noise floor (typically estimated from pre-stim frames).
+if isempty(V)
+    Veff = V;
+else
+    vFloor = optsPlot.valueFloor;
+    if isempty(vFloor) || ~isscalar(vFloor) || ~isfinite(vFloor) || vFloor < 0
+        vFloor = 0;
+    end
+    Veff = max(0, V - vFloor);
 end
 
 % ---- Robust color scaling (95th percentile of plotted positives) ----
 if ~isempty(optsPlot.cMaxFixed) && isfinite(optsPlot.cMaxFixed) && optsPlot.cMaxFixed > 0
     cMax = optsPlot.cMaxFixed;
-elseif isempty(V)
+elseif isempty(Veff)
     cMax = 1;
 else
-    cMax = prctile(V, optsPlot.robustPct);
+    cMax = prctile(Veff, optsPlot.robustPct);
     if ~isfinite(cMax) || cMax <= 0
-        cMax = max(V);
+        cMax = max(Veff);
     end
     if ~isfinite(cMax) || cMax <= 0
         cMax = 1;
     end
 end
 
-tRaw = V ./ cMax;
+tRaw = Veff ./ cMax;
 t = min(max(tRaw, 0), 1);
+
+% Value where color reaches red. If not provided, keep legacy cMax behavior.
+if ~isempty(optsPlot.colorRedAt) && isscalar(optsPlot.colorRedAt) && ...
+        isfinite(optsPlot.colorRedAt) && optsPlot.colorRedAt > 0
+    redAt = optsPlot.colorRedAt;
+else
+    redAt = cMax;
+end
+r = max(0, Veff ./ redAt);  % r=1 means "red reached"
+
 if optsPlot.hotScale
-    % cMax is a reference scale, not a hard max; allow hotter colors above cMax.
     hotCap = max(1.01, optsPlot.colorHotMaxFactor);
-    tColor = min(max(tRaw, 0), hotCap);
-    tk = [0.00, 0.45, 0.80, 1.00, hotCap];
+    tColor = min(r, hotCap);
+    tk = [0.00, 1.00, min(2.0, hotCap), hotCap];
     ck = [optsPlot.cLow;
-          0.85 0.05 0.05;
-          1.00 0.90 0.20;
-          1.00 0.95 0.45;
-          1.00 1.00 1.00];
+          [0.85 0.05 0.05];
+          [1.00 0.90 0.20];
+          [1.00 1.00 1.00]];
+    if hotCap <= 2
+        tk = [0.00, 1.00, hotCap];
+        ck = [optsPlot.cLow;
+              [0.85 0.05 0.05];
+              [1.00 1.00 1.00]];
+    end
     C = zeros(numel(tColor), 3);
     for j = 1:3
         C(:,j) = interp1(tk, ck(:,j), tColor, 'linear', 'extrap');
     end
 else
-    C = (1-t).*optsPlot.cLow + t.*optsPlot.cHigh;
+    tr = min(max(r, 0), 1);
+    C = (1-tr).*optsPlot.cLow + tr.*optsPlot.cHigh;
 end
-if isempty(V)
+if isempty(Veff)
     alphaPoint = [];
 else
-    if isfinite(optsPlot.alphaValueFloor) && optsPlot.alphaValueFloor > 0
-        denom = max(cMax - optsPlot.alphaValueFloor, eps);
-        % Soft-thresholded ramp around alphaValueFloor (reduces hard "pop-in")
-        x = (V - optsPlot.alphaValueFloor) ./ denom;
-        s = max(optsPlot.alphaFloorSoft, eps);
-        u = 0.5 * (x + sqrt(x.^2 + s^2));  % smooth approx of max(0,x)
-        u = min(1, max(0, u));
-        alphaScale = max(optsPlot.alphaValueMinScale, u .^ optsPlot.alphaValueGamma);
+    if ~isempty(optsPlot.alphaFullAt) && isscalar(optsPlot.alphaFullAt) && ...
+            isfinite(optsPlot.alphaFullAt) && optsPlot.alphaFullAt > 0
+        alphaScale = min(max(Veff ./ optsPlot.alphaFullAt, 0), 1);
     else
-        alphaScale = max(optsPlot.alphaValueMinScale, t .^ optsPlot.alphaValueGamma);
+        if isfinite(optsPlot.alphaValueFloor) && optsPlot.alphaValueFloor > 0
+            denom = max(cMax - optsPlot.alphaValueFloor, eps);
+            % Soft-thresholded ramp around alphaValueFloor (reduces hard "pop-in")
+            x = (Veff - optsPlot.alphaValueFloor) ./ denom;
+            s = max(optsPlot.alphaFloorSoft, eps);
+            u = 0.5 * (x + sqrt(x.^2 + s^2));  % smooth approx of max(0,x)
+            u = min(1, max(0, u));
+            alphaScale = max(optsPlot.alphaValueMinScale, u .^ optsPlot.alphaValueGamma);
+        else
+            alphaScale = max(optsPlot.alphaValueMinScale, t .^ optsPlot.alphaValueGamma);
+        end
     end
     alphaPoint = min(1, max(0, optsPlot.alpha * alphaScale));
 end
@@ -570,10 +611,8 @@ if ~isempty(X)
                 hSc.MarkerEdgeAlpha = 'flat';
             end
         catch
-            hSc.MarkerFaceAlpha = optsPlot.alpha;
-            if isprop(hSc,'MarkerEdgeAlpha')
-                hSc.MarkerEdgeAlpha = optsPlot.alpha;
-            end
+            delete(hSc);
+            scatter_alpha_fallback(ax, X, Y, C, alphaPoint, optsPlot.markerSize);
         end
     else
         hSc.MarkerFaceAlpha = optsPlot.alpha;
@@ -603,6 +642,7 @@ h.nDistrContrib = nDistrContrib;
 h.cMax = cMax;
 h.stimID = stimID_example;
 h.V = V;
+h.Veff = Veff;
 end
 
 function printStats(label, v)
@@ -755,4 +795,53 @@ else
 end
 
 V_s(valid) = vNew;
+end
+
+function V_s = smooth_values_by_pixel_neighbors_grouped(X, Y, V, G, neighborN)
+% Smooth in image space, but keep target and distractor streams separate.
+V_s = V;
+if isempty(V) || isempty(G) || numel(G) ~= numel(V)
+    V_s = smooth_values_by_pixel_neighbors(X, Y, V, neighborN);
+    return;
+end
+
+for g = [1 2]
+    idx = (G == g);
+    if nnz(idx) <= 1
+        continue;
+    end
+    V_s(idx) = smooth_values_by_pixel_neighbors(X(idx), Y(idx), V(idx), neighborN);
+end
+end
+
+function scatter_alpha_fallback(ax, X, Y, C, alphaPoint, markerSize)
+% Compatibility fallback for MATLAB versions that fail on per-point AlphaData.
+if isempty(X) || isempty(alphaPoint)
+    return;
+end
+
+nBins = 12;
+a = min(max(double(alphaPoint(:)), 0), 1);
+xb = double(X(:));
+yb = double(Y(:));
+Cb = double(C);
+
+for bi = 1:nBins
+    lo = (bi-1)/nBins;
+    hi = bi/nBins;
+    if bi < nBins
+        idx = (a > lo) & (a <= hi);
+    else
+        idx = (a > lo) & (a <= hi + eps);
+    end
+    if ~any(idx)
+        continue;
+    end
+    h = scatter(ax, xb(idx), yb(idx), markerSize, Cb(idx,:), 'filled');
+    h.MarkerEdgeColor = 'none';
+    h.MarkerFaceAlpha = hi;
+    if isprop(h,'MarkerEdgeAlpha')
+        h.MarkerEdgeAlpha = hi;
+    end
+end
 end

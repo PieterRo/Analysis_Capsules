@@ -4,8 +4,11 @@
 %% Run switches
 RUN_HISTOGRAM = false;
 RUN_QC = false;
-RUN_STILLS = true;
-RUN_MOVIE = false;
+RUN_POST_AFFINE_VALUES = false;
+RUN_PREP_ANCHOR_KNN = false;
+RUN_PREP_NOISE_SIGNAL = false;
+RUN_STILLS = false;
+RUN_MOVIE = true;
 
 %% Central parameters
 P = struct();
@@ -19,24 +22,38 @@ P.idxClip = 2;                       % histogram clipping
 P.plotAlpha = 0.55;                  % constant across windows
 P.plotRobustPct = 95;
 P.plotBgColor = [0.5 0.5 0.5];
-P.plotCLow = [0.55 0.55 0.55];       % weak effects blend into background
+P.plotCLow = [0.50 0.50 0.50];       % weak effects start at background tone
 P.plotCHigh = [0.85 0.05 0.05];
 P.neighborN = 1;                      % RF-center smoothing (set 1 to disable)
-P.pixelNeighborN = 50;               % image-space KNN averaging after affine projection
+P.pixelNeighborN = 140;               % image-space KNN averaging after affine projectionNow N
 P.pixelSmoothSigma = 0;               % optional Gaussian fallback in image space
 P.alphaValueGamma = 4.0;
 P.alphaValueMinScale = 0.01;         % keep weak points slightly visible
 P.alphaFloorSoft = 0.20;             % soften transition around alpha floor
-P.preStimCalibratedAlpha = true;
+P.alphaFullAt = 0.20;                % normalized T-D value where alpha reaches 1
+P.denMin = 0.03;                     % minimum |OUT3.muT-muD| for site normalization
+P.preStimCalibratedAlpha = false;
 P.preStimPercentile = 99.9;          % fewer pre-stim points near full opacity
 P.plotMarkerSize = 8;
 P.alphaByValue = true;
-P.hotScale = true;
-P.colorHotMaxFactor = 4.0;           % allow values > cMax to become hotter
+P.hotScale = true;                 % default: gray->red only (no yellow/white hot colors)
+P.colorHotMaxFactor = 8.0;           % allow values > cMax to become hotter
+P.colorRedAt = 0.20;                 % value where point color reaches red
 P.useSiteScale = true;               % per-site late-phase scaling
 P.siteScaleLateWindow = [300 500];   % ms, used to build per-site scale
 P.siteScaleStat = 'mean_plus_sd';    % per-site scale from late-phase values
 P.siteScaleMin = 1e-6;
+P.prepK = 30;                        % K for global post-affine KNN averaging
+P.prepNPick = 5;                     % number of anchor combinations for diagnostics
+P.prepKList = [1 10 20 30 50 80];    % K sweep for noise/signal prep
+P.preEndMs = 0;                      % pre bins: end <= this time
+P.postStartMs = 300;                 % post bins: start >= this time
+P.preQuantilePct = 95;               % threshold from pre-stim |value| quantile
+P.alphaFloorPct = 80;                % suggested alpha floor from pre-stim
+P.cMaxPostPct = 95;                  % suggested cMax from post-stim
+P.stillRunConsistencyCheck = false;  % expensive global KNN check; disable for speed
+P.timeLabelRef = 'start';            % 'start' keeps stimulus onset aligned at 0 ms
+P.stimOnsetMs = 0;                   % stimulus becomes visible from this bin start (ms)
 
 
 %% Required context
@@ -112,7 +129,7 @@ if RUN_HISTOGRAM
 end
 
 %% Load high-resolution response windows
-if RUN_QC || RUN_STILLS || RUN_MOVIE
+if RUN_QC || RUN_POST_AFFINE_VALUES || RUN_STILLS || RUN_MOVIE
     if ~exist('R_resp', 'var') || ~isstruct(R_resp)
         S = load(fullfile(cfg.matDir, 'Resp_capsules_N_d12.mat'));  % loads R
         R_resp = S.R;
@@ -124,57 +141,53 @@ if RUN_QC || RUN_STILLS || RUN_MOVIE
         ['Resp_capsules_N_d12.mat appears to have only %d windows. ' ...
          'Expected many short windows for 10 ms plotting/movie.'], size(R_resp.timeWindows,1));
 
-    [~, timeIdx10] = min(sum(abs(R_resp.timeWindows - P.targetWin10),2));
-    win10 = R_resp.timeWindows(timeIdx10,:);
-    assert((win10(2)-win10(1)) <= 25, ...
-        'Selected 10 ms bin is [%d %d] ms (duration %.1f ms).', win10(1), win10(2), win10(2)-win10(1));
+    [~, timeIdxTarget] = min(sum(abs(R_resp.timeWindows - P.targetWin10),2));
+    winTarget = R_resp.timeWindows(timeIdxTarget,:);
+    assert((winTarget(2)-winTarget(1)) <= 25, ...
+        'Selected target bin is [%d %d] ms (duration %.1f ms).', winTarget(1), winTarget(2), winTarget(2)-winTarget(1));
 
     [~, timeIdxPre] = min(sum(abs(R_resp.timeWindows - P.targetWinPre),2));
     winPre = R_resp.timeWindows(timeIdxPre,:);
     assert((winPre(2)-winPre(1)) <= 25, ...
         'Selected pre-stim bin is [%d %d] ms (duration %.1f ms).', winPre(1), winPre(2), winPre(2)-winPre(1));
 
-    opts10 = struct('timeIdx',timeIdx10,'excludeOverlap',true,'verbose',false);
+    optsTarget = struct('timeIdx',timeIdxTarget,'excludeOverlap',true,'verbose',false);
     optsPre = struct('timeIdx',timeIdxPre,'excludeOverlap',true,'verbose',false);
-    OUT10 = attention_modulation_V1_3bin(R_resp, Tall_V1, SNRnorm, opts10);
-    OUTpre = attention_modulation_V1_3bin(R_resp, Tall_V1, SNRnorm, optsPre);
+    OUTTarget = attention_modulation_V1_3bin(R_resp, Tall_V1, SNRnorm, optsTarget);
+    OUTPre = attention_modulation_V1_3bin(R_resp, Tall_V1, SNRnorm, optsPre);
 
-    OUT10plot = OUT10;
-    OUT10plot.pValueTD = OUT3.pValueTD;   % hard significance rule
-    OUTprePlot = OUTpre;
-    OUTprePlot.pValueTD = OUT3.pValueTD;  % hard significance rule
 end
 
 %% QC diagnostics
 if RUN_QC
     d3 = OUT3.muT - OUT3.muD;
-    d10 = OUT10.muT - OUT10.muD;
-    dpre = OUTpre.muT - OUTpre.muD;
+    dTarget = OUTTarget.muT - OUTTarget.muD;
+    dPre = OUTPre.muT - OUTPre.muD;
 
-    ok10 = isfinite(d3) & isfinite(d10);
-    if any(ok10)
-        r10 = corr(d3(ok10), d10(ok10));
-        dd10 = abs(d3(ok10) - d10(ok10));
-        fprintf('Delta(T-D) 3-bin vs 10-ms: corr=%.4f, median|diff|=%.6g, max|diff|=%.6g\n', ...
-            r10, median(dd10), max(dd10));
+    okTarget = isfinite(d3) & isfinite(dTarget);
+    if any(okTarget)
+        rTarget = corr(d3(okTarget), dTarget(okTarget));
+        ddTarget = abs(d3(okTarget) - dTarget(okTarget));
+        fprintf('Delta(T-D) 3-bin vs target bin: corr=%.4f, median|diff|=%.6g, max|diff|=%.6g\n', ...
+            rTarget, median(ddTarget), max(ddTarget));
     else
-        fprintf('Delta(T-D) 3-bin vs 10-ms unavailable (no finite overlap).\n');
+        fprintf('Delta(T-D) 3-bin vs target bin unavailable (no finite overlap).\n');
     end
 
-    okPre = isfinite(d3) & isfinite(dpre);
+    okPre = isfinite(d3) & isfinite(dPre);
     if any(okPre)
-        rPre = corr(d3(okPre), dpre(okPre));
-        ddPre = abs(d3(okPre) - dpre(okPre));
+        rPre = corr(d3(okPre), dPre(okPre));
+        ddPre = abs(d3(okPre) - dPre(okPre));
         fprintf('Delta(T-D) 3-bin vs pre-stim: corr=%.4f, median|diff|=%.6g, max|diff|=%.6g\n', ...
             rPre, median(ddPre), max(ddPre));
     end
 
     fprintf('nSig pre-stim (pTD < %.2f): %d / %d sites\n', P.pThresh, ...
-        nnz(isfinite(OUTpre.pValueTD) & OUTpre.pValueTD < P.pThresh), numel(OUTpre.pValueTD));
+        nnz(isfinite(OUTPre.pValueTD) & OUTPre.pValueTD < P.pThresh), numel(OUTPre.pValueTD));
 
-    sigPre = isfinite(OUT3.pValueTD) & (OUT3.pValueTD < P.pThresh) & isfinite(dpre);
-    nPrePos = nnz(sigPre & (dpre > 0));   % T > D
-    nPreNeg = nnz(sigPre & (dpre < 0));   % D > T
+    sigPre = isfinite(OUT3.pValueTD) & (OUT3.pValueTD < P.pThresh) & isfinite(dPre);
+    nPrePos = nnz(sigPre & (dPre > 0));   % T > D
+    nPreNeg = nnz(sigPre & (dPre < 0));   % D > T
     nPreTot = nPrePos + nPreNeg;
     if nPreTot > 0
         fracPos = nPrePos / nPreTot;
@@ -190,150 +203,271 @@ if RUN_QC
     end
 end
 
-%% Optional per-site late-phase scaling
-siteScale = [];
-if RUN_STILLS && P.useSiteScale
-    siteScale = compute_site_scale_late(R_resp, Tall_V1, SNRnorm, P.siteRange, ...
-        P.siteScaleLateWindow, true, P.siteScaleStat);
-    if ~isempty(siteScale)
-        bad = ~isfinite(siteScale) | siteScale <= 0;
-        siteScale(bad) = NaN;
-        siteScale = max(siteScale, P.siteScaleMin);
-    end
+%% Optional export of post-affine signed T-D values for all bins
+outValuesFile = fullfile(cfg.resultsDir, sprintf('post_affine_delta_points_allbins_stim%d.mat', P.stimIDExample));
+if RUN_POST_AFFINE_VALUES
+    siteRangeVals = P.siteRange(:)';
+    sigMaskVals = isfinite(OUT3.pValueTD(siteRangeVals)) & (OUT3.pValueTD(siteRangeVals) < P.pThresh);
+
+    OUT_postAffine = compute_projected_delta_points_allbins( ...
+        P.stimIDExample, Tall_V1, ALLCOORDS, RTAB384, R_resp, SNRnorm, ...
+        'siteRange', P.siteRange, ...
+        'excludeOverlap', true, ...
+        'stimIdx', 1:384, ...
+        'sigSiteMask', sigMaskVals, ...
+        'saveFile', outValuesFile, ...
+        'verbose', true);
+    fprintf('Post-affine values saved (significant sites only): %s\n', outValuesFile);
 end
 
-%% Shared visualization normalization (used by stills and movie)
-if RUN_STILLS || RUN_MOVIE
-    d10 = OUT10.muT - OUT10.muD;
-    dpre = OUTpre.muT - OUTpre.muD;
-    sigMask = isfinite(OUT3.pValueTD) & (OUT3.pValueTD < P.pThresh);
-    alphaFloorShared = 0;
-    if P.useSiteScale && ~isempty(siteScale)
-        cShared = 1;
-        if P.preStimCalibratedAlpha
-            preVals = abs(dpre(sigMask));
-            preVals = preVals(isfinite(preVals) & preVals > 0);
-            s = siteScale(P.siteRange(sigMask));
-            good = isfinite(s) & s > 0;
-            preVals = preVals(good) ./ s(good);
-            if ~isempty(preVals)
-                alphaFloorShared = prctile(preVals, P.preStimPercentile);
-                if ~isfinite(alphaFloorShared) || alphaFloorShared < 0
-                    alphaFloorShared = 0;
-                end
-            end
-        end
-        fprintf('Using per-site late-phase scaling: cMax=%.6g', cShared);
-    else
-        poolVals = [abs(d10(sigMask)); abs(dpre(sigMask))];
-        poolVals = poolVals(isfinite(poolVals) & poolVals > 0);
-
-        if isempty(poolVals)
-            cShared = 1;
+%% Optional pre-movie anchor/KNN diagnostics on post-affine values
+if RUN_PREP_ANCHOR_KNN
+    if ~exist('OUT_postAffine', 'var')
+        assert(exist(outValuesFile, 'file') == 2, ...
+            'Post-affine values file missing: %s', outValuesFile);
+        S = load(outValuesFile);
+        if isfield(S, 'OUT')
+            OUT_postAffine = S.OUT;
+        elseif isfield(S, 'D')
+            OUT_postAffine = S.D;
         else
-            cShared = prctile(poolVals, P.plotRobustPct);
-            if ~isfinite(cShared) || cShared <= 0
-                cShared = max(poolVals);
-            end
-            if ~isfinite(cShared) || cShared <= 0
-                cShared = 1;
-            end
+            error('File %s must contain OUT or D.', outValuesFile);
         end
-        if P.preStimCalibratedAlpha
-            preVals = abs(dpre(sigMask));
-            preVals = preVals(isfinite(preVals) & preVals > 0);
-            if ~isempty(preVals)
-                alphaFloorShared = prctile(preVals, P.preStimPercentile);
-                if ~isfinite(alphaFloorShared) || alphaFloorShared < 0
-                    alphaFloorShared = 0;
-                end
-            end
-        end
-        fprintf('Using shared normalization anchors: cMax=%.6g', cShared);
     end
-    fprintf(', alphaFloor=%.6g\n', alphaFloorShared);
+
+    prepFile = fullfile(cfg.resultsDir, sprintf('anchor_knn_prep_stim%d.mat', P.stimIDExample));
+    PREP = analyze_anchor_knn_timeseries( ...
+        OUT_postAffine, Tall_V1, OUT3, P.stimIDExample, ...
+        'siteRange', P.siteRange, ...
+        'pThresh', P.pThresh, ...
+        'K', P.prepK, ...
+        'nPick', P.prepNPick, ...
+        'makePlot', true, ...
+        'verbose', true, ...
+        'saveFile', prepFile);
+    fprintf('Saved pre-movie anchor/KNN diagnostics to: %s\n', prepFile);
+end
+
+%% Optional pre-movie noise vs signal calibration across K
+if RUN_PREP_NOISE_SIGNAL
+    if ~exist('OUT_postAffine', 'var')
+        assert(exist(outValuesFile, 'file') == 2, ...
+            'Post-affine values file missing: %s', outValuesFile);
+        S = load(outValuesFile);
+        if isfield(S, 'OUT')
+            OUT_postAffine = S.OUT;
+        elseif isfield(S, 'D')
+            OUT_postAffine = S.D;
+        else
+            error('File %s must contain OUT or D.', outValuesFile);
+        end
+    end
+
+    prepNoiseFile = fullfile(cfg.resultsDir, sprintf('knn_noise_signal_prep_stim%d.mat', P.stimIDExample));
+    PREP_NOISE = analyze_knn_noise_signal_thresholds( ...
+        OUT_postAffine, Tall_V1, ...
+        'KList', P.prepKList, ...
+        'preEndMs', P.preEndMs, ...
+        'postStartMs', P.postStartMs, ...
+        'preQuantilePct', P.preQuantilePct, ...
+        'alphaFloorPct', P.alphaFloorPct, ...
+        'cMaxPostPct', P.cMaxPostPct, ...
+        'kRef', P.prepK, ...
+        'enforceK', true, ...
+        'makePlot', true, ...
+        'verbose', true, ...
+        'saveFile', prepNoiseFile);
+    fprintf('Saved pre-movie noise/signal calibration to: %s\n', prepNoiseFile);
 end
 
 %% Still plots
 if RUN_STILLS
 
-    optsPlot = struct();
-    optsPlot.RTAB384 = RTAB384;
-    optsPlot.pThresh = P.pThresh;
-    optsPlot.siteRange = P.siteRange;
-    optsPlot.markerSize = P.plotMarkerSize;
-    optsPlot.alpha = P.plotAlpha;
-    optsPlot.robustPct = P.plotRobustPct;
-    optsPlot.cMaxFixed = cShared;
-    optsPlot.bgColor = P.plotBgColor;
-    optsPlot.cLow = P.plotCLow;
-    optsPlot.cHigh = P.plotCHigh;
-    optsPlot.hotScale = P.hotScale;
-    optsPlot.colorHotMaxFactor = P.colorHotMaxFactor;
-    optsPlot.projectionMode = 'quartet_pooled';
-    optsPlot.Rdata = R_resp;
-    optsPlot.SNRnorm = SNRnorm;
-    optsPlot.neighborN = P.neighborN;
-    optsPlot.pixelNeighborN = P.pixelNeighborN;
-    optsPlot.pixelSmoothSigma = P.pixelSmoothSigma;
-    optsPlot.alphaByValue = P.alphaByValue;
-    optsPlot.alphaValueGamma = P.alphaValueGamma;
-    optsPlot.alphaValueMinScale = P.alphaValueMinScale;
-    optsPlot.alphaFloorSoft = P.alphaFloorSoft;
-    optsPlot.alphaValueFloor = alphaFloorShared;
-    optsPlot.siteScale = siteScale;
+    % Use post-affine points + prep thresholds (same value pipeline as prep).
+    if ~exist('OUT_postAffine', 'var')
+        assert(exist(outValuesFile, 'file') == 2, ...
+            'Post-affine values file missing: %s', outValuesFile);
+        S = load(outValuesFile);
+        if isfield(S, 'OUT')
+            OUT_postAffine = S.OUT;
+        elseif isfield(S, 'D')
+            OUT_postAffine = S.D;
+        else
+            error('File %s must contain OUT or D.', outValuesFile);
+        end
+    end
+    assert(isfield(OUT_postAffine, 'bins') && numel(OUT_postAffine.bins) >= max([timeIdxPre timeIdxTarget]), ...
+        'OUT_postAffine.bins missing or shorter than requested time indices.');
+    assert(isfield(OUT_postAffine.bins, 'stream'), ...
+        ['OUT_postAffine.bins.stream missing. Re-run RUN_POST_AFFINE_VALUES with the ' ...
+         'updated compute_projected_delta_points_allbins.m']);
 
-    % ===== SMALL WINDOW FRAME PLOT (~10 ms) =====
-    optsPlot.timeIdx = timeIdx10;
-    optsPlot.alpha = P.plotAlpha;
-    hSmall = plot_projected_attentiondiff_on_example_stim( ...
-        P.stimIDExample, OUT10plot, Tall_V1, ALLCOORDS, optsPlot);
+    prepNoiseFile = fullfile(cfg.resultsDir, sprintf('knn_noise_signal_prep_stim%d.mat', P.stimIDExample));
+    assert(exist(prepNoiseFile, 'file') == 2, ...
+        'Noise/signal prep file missing: %s. Run RUN_PREP_NOISE_SIGNAL first.', prepNoiseFile);
+    Sns = load(prepNoiseFile);
+    assert(isfield(Sns, 'R') && isfield(Sns.R, 'summary') && istable(Sns.R.summary), ...
+        'Prep file %s must contain R.summary table.', prepNoiseFile);
+    Tns = Sns.R.summary;
+
+    rowK = find(Tns.K == P.prepK, 1, 'first');
+    assert(~isempty(rowK), ...
+        'Requested prep K=%d not found in summary. Update P.prepK or rerun prep with this K.', P.prepK);
+    Kuse = double(Tns.K(rowK));
+    thrUse = double(Tns.thresholdPreQ(rowK));
+    assert(isfinite(thrUse) && thrUse > 0, ...
+        'Invalid thresholdPreQ at K=%d in prep summary.', Kuse);
+    cMaxUse = double(Tns.cMaxSuggest(rowK));
+    if ~isfinite(cMaxUse) || cMaxUse <= 0
+        cMaxUse = [];
+    end
+    fprintf('RUN_STILLS using prep settings: K=%d, threshold=%.6g, cMax=%s\n', ...
+        Kuse, thrUse, mat2str(cMaxUse));
+    if ismember('preExceedFrac', Tns.Properties.VariableNames) && ismember('postExceedFrac', Tns.Properties.VariableNames)
+        fprintf('Prep expected exceedance at K=%d: pre=%.2f%%, post=%.2f%%\n', ...
+            Kuse, 100*double(Tns.preExceedFrac(rowK)), 100*double(Tns.postExceedFrac(rowK)));
+    end
+
+    if P.stillRunConsistencyCheck
+        % Consistency check: recompute exceedance directly from OUT_postAffine.
+        preMaskBins = R_resp.timeWindows(:,2) <= P.preEndMs;
+        postMaskBins = R_resp.timeWindows(:,1) >= P.postStartMs;
+        Scheck = summarize_post_affine_threshold_exceedance( ...
+            OUT_postAffine, Kuse, thrUse, preMaskBins, postMaskBins, false);
+        fprintf('Consistency check from OUT_postAffine: pre=%.2f%%, post=%.2f%%\n', ...
+            100*Scheck.preFrac, 100*Scheck.postFrac);
+        if ismember('preExceedFrac', Tns.Properties.VariableNames) && ismember('postExceedFrac', Tns.Properties.VariableNames)
+            dPre = abs(Scheck.preFrac - double(Tns.preExceedFrac(rowK)));
+            dPost = abs(Scheck.postFrac - double(Tns.postExceedFrac(rowK)));
+            fprintf('Prep vs check difference: pre=%.2f%%, post=%.2f%%\n', 100*dPre, 100*dPost);
+            if dPre > 0.01 || dPost > 0.01
+                warning(['Prep and direct OUT_postAffine check disagree by >1%%. ' ...
+                         'Check if prep/out files are stale or generated with different settings.']);
+            end
+        end
+    else
+        Scheck = struct('fracByBin', nan(numel(OUT_postAffine.bins),1));
+    end
+
+    showStimTarget = (winTarget(1) >= P.stimOnsetMs);
+    showStimPre = (winPre(1) >= P.stimOnsetMs);
+
+    % ===== POST-STIM FRAME =====
+    hSmall = plot_post_affine_knn_frame( ...
+        P.stimIDExample, ALLCOORDS, RTAB384, OUT_postAffine.bins(timeIdxTarget), ...
+        'K', Kuse, ...
+        'alphaFullAt', thrUse, ...
+        'colorRedAt', thrUse, ...
+        'cMaxFixed', cMaxUse, ...
+        'markerSize', P.plotMarkerSize, ...
+        'alpha', 1, ...
+        'bgColor', P.plotBgColor, ...
+        'cLow', P.plotCLow, ...
+        'cHigh', P.plotCHigh, ...
+        'hotScale', P.hotScale, ...
+        'colorHotMaxFactor', P.colorHotMaxFactor, ...
+        'timeWindow', winTarget, ...
+        'timeLabelRef', P.timeLabelRef, ...
+        'showStimulus', showStimTarget, ...
+        'enforceK', false);
     figure(hSmall.fig);
     set(hSmall.fig, 'Name', 'Attention TD | Small window (~10 ms)', 'NumberTitle', 'off');
     title(hSmall.ax, sprintf('Small-window attention map | [%d %d] ms | stim %d', ...
-        win10(1), win10(2), P.stimIDExample), 'Color','w');
-    fprintf('Using 10 ms bin %d: [%d %d] ms\n', timeIdx10, win10(1), win10(2));
+        winTarget(1), winTarget(2), P.stimIDExample), 'Color','w');
+    fprintf('Using target bin %d: [%d %d] ms | plotted >thr: %.2f%%\n', ...
+        timeIdxTarget, winTarget(1), winTarget(2), 100*hSmall.fracAboveThreshold);
+    if isfinite(Scheck.fracByBin(timeIdxTarget))
+        fprintf('  direct bin check >thr: %.2f%%\n', 100*Scheck.fracByBin(timeIdxTarget));
+    end
 
-    % ===== PRE-STIM (SPONTANEOUS) FRAME PLOT =====
-    optsPlot.timeIdx = timeIdxPre;
-    optsPlot.alpha = P.plotAlpha;  % keep alpha fixed across frames
-    hPre = plot_projected_attentiondiff_on_example_stim( ...
-        P.stimIDExample, OUTprePlot, Tall_V1, ALLCOORDS, optsPlot);
+    % ===== PRE-STIM FRAME =====
+    hPre = plot_post_affine_knn_frame( ...
+        P.stimIDExample, ALLCOORDS, RTAB384, OUT_postAffine.bins(timeIdxPre), ...
+        'K', Kuse, ...
+        'alphaFullAt', thrUse, ...
+        'colorRedAt', thrUse, ...
+        'cMaxFixed', cMaxUse, ...
+        'markerSize', P.plotMarkerSize, ...
+        'alpha', 1, ...
+        'bgColor', P.plotBgColor, ...
+        'cLow', P.plotCLow, ...
+        'cHigh', P.plotCHigh, ...
+        'hotScale', P.hotScale, ...
+        'colorHotMaxFactor', P.colorHotMaxFactor, ...
+        'timeWindow', winPre, ...
+        'timeLabelRef', P.timeLabelRef, ...
+        'showStimulus', showStimPre, ...
+        'enforceK', false);
     figure(hPre.fig);
     set(hPre.fig, 'Name', 'Attention TD | Pre-stim control', 'NumberTitle', 'off');
     title(hPre.ax, sprintf('Pre-stim control map | [%d %d] ms | stim %d', ...
         winPre(1), winPre(2), P.stimIDExample), 'Color','w');
-    fprintf('Using pre-stim bin %d: [%d %d] ms\n', timeIdxPre, winPre(1), winPre(2));
-    fprintf('Pre-stim plotted contributions: target=%d, distractor=%d\n', ...
-        hPre.nTargetContrib, hPre.nDistrContrib);
+    fprintf('Using pre-stim bin %d: [%d %d] ms | plotted >thr: %.2f%%\n', ...
+        timeIdxPre, winPre(1), winPre(2), 100*hPre.fracAboveThreshold);
+    if isfinite(Scheck.fracByBin(timeIdxPre))
+        fprintf('  direct bin check >thr: %.2f%%\n', 100*Scheck.fracByBin(timeIdxPre));
+    end
 end
 
 %% Optional movie rendering
 if RUN_MOVIE
-    outMovie = fullfile(cfg.resultsDir, 'V1_attentiondiff_movie_10ms.mp4');
-    make_attention_movie_wrapper_safe( ...
-        outMovie, Tall_V1, ALLCOORDS, RTAB384, P.stimIDExample, R_resp, SNRnorm, OUT3, ...
-        'pThresh', P.pThresh, ...
-        'alpha', P.plotAlpha, ...
+    if ~exist('OUT_postAffine', 'var')
+        assert(exist(outValuesFile, 'file') == 2, ...
+            'Post-affine values file missing: %s', outValuesFile);
+        S = load(outValuesFile);
+        if isfield(S, 'OUT')
+            OUT_postAffine = S.OUT;
+        elseif isfield(S, 'D')
+            OUT_postAffine = S.D;
+        else
+            error('File %s must contain OUT or D.', outValuesFile);
+        end
+    end
+    assert(isfield(OUT_postAffine, 'bins') && ~isempty(OUT_postAffine.bins), ...
+        'OUT_postAffine.bins missing/empty.');
+    assert(isfield(OUT_postAffine.bins, 'stream'), ...
+        ['OUT_postAffine.bins.stream missing. Re-run RUN_POST_AFFINE_VALUES with the ' ...
+         'updated compute_projected_delta_points_allbins.m']);
+
+    prepNoiseFile = fullfile(cfg.resultsDir, sprintf('knn_noise_signal_prep_stim%d.mat', P.stimIDExample));
+    assert(exist(prepNoiseFile, 'file') == 2, ...
+        'Noise/signal prep file missing: %s. Run RUN_PREP_NOISE_SIGNAL first.', prepNoiseFile);
+    Sns = load(prepNoiseFile);
+    assert(isfield(Sns, 'R') && isfield(Sns.R, 'summary') && istable(Sns.R.summary), ...
+        'Prep file %s must contain R.summary table.', prepNoiseFile);
+    Tns = Sns.R.summary;
+    rowK = find(Tns.K == P.prepK, 1, 'first');
+    assert(~isempty(rowK), ...
+        'Requested prep K=%d not found in summary. Update P.prepK or rerun prep.', P.prepK);
+
+    Kuse = double(Tns.K(rowK));
+    thrUse = double(Tns.thresholdPreQ(rowK));
+    assert(isfinite(thrUse) && thrUse > 0, ...
+        'Invalid thresholdPreQ at K=%d in prep summary.', Kuse);
+    cMaxUse = double(Tns.cMaxSuggest(rowK));
+    if ~isfinite(cMaxUse) || cMaxUse <= 0
+        cMaxUse = [];
+    end
+
+    outMovie = fullfile(cfg.resultsDir, sprintf('V1_attentiondiff_movie_postaffine_K%d.mp4', Kuse));
+    MOV = make_post_affine_attention_movie( ...
+        outMovie, P.stimIDExample, ALLCOORDS, RTAB384, OUT_postAffine, ...
+        'K', Kuse, ...
+        'alphaFullAt', thrUse, ...
+        'colorRedAt', thrUse, ...
+        'cMaxFixed', cMaxUse, ...
         'markerSize', P.plotMarkerSize, ...
-        'robustPct', P.plotRobustPct, ...
+        'alpha', P.plotAlpha, ...
         'bgColor', P.plotBgColor, ...
         'cLow', P.plotCLow, ...
         'cHigh', P.plotCHigh, ...
-        'neighborN', P.neighborN, ...
-        'pixelNeighborN', P.pixelNeighborN, ...
-        'pixelSmoothSigma', P.pixelSmoothSigma, ...
-        'alphaByValue', P.alphaByValue, ...
-        'alphaValueGamma', P.alphaValueGamma, ...
-        'alphaValueMinScale', P.alphaValueMinScale, ...
-        'alphaFloorSoft', P.alphaFloorSoft, ...
         'hotScale', P.hotScale, ...
         'colorHotMaxFactor', P.colorHotMaxFactor, ...
-        'preStimCalibratedAlpha', P.preStimCalibratedAlpha, ...
-        'preStimPercentile', P.preStimPercentile, ...
-        'cMaxFixed', cShared, ...
-        'alphaValueFloorFixed', alphaFloorShared, ...
-        'useSiteScale', P.useSiteScale, ...
-        'siteScaleLateWindow', P.siteScaleLateWindow, ...
-        'siteScaleStat', P.siteScaleStat);
+        'timeLabelRef', P.timeLabelRef, ...
+        'stimOnsetMs', P.stimOnsetMs, ...
+        'frameRate', 10, ...
+        'quality', 95, ...
+        'enforceK', false, ...
+        'verbose', true);
+    fprintf('Saved post-affine movie to: %s\n', MOV.outMovie);
 end

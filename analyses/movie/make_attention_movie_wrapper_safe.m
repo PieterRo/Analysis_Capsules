@@ -40,6 +40,7 @@ function make_attention_movie_wrapper_safe(outFile, ...
 %   'alphaFloorSoft'  (0.20) % softness around pre-stim alpha floor threshold
 %   'hotScale'         (true) % red->yellow->white for strongest values
 %   'colorHotMaxFactor' (3.0) % allow values > cMax to become hotter
+%   'colorRedAt'       (0.2)  % value where color reaches red
 %   'preStimCalibratedAlpha' (true) % set alpha floor from pre-stim distribution
 %   'preStimPercentile' (99.7) % percentile used to set alpha floor
 %   'cMaxFixed'        ([])   % if set, use this shared color reference for all frames
@@ -47,6 +48,9 @@ function make_attention_movie_wrapper_safe(outFile, ...
 %   'useSiteScale'      (false) % use per-site late-phase scaling
 %   'siteScaleLateWindow' ([300 500]) % ms window used for per-site scaling
 %   'siteScaleStat'     ('mean_plus_sd') % statistic for per-site scaling
+%   'denMin'           (1e-3) % minimum |OUT3.muT-muD| to keep a site
+%   'alphaFullAt'      (0.2)  % normalized value where alpha reaches full opacity
+%   'subtractPreStimBaseline' (true) % subtract mean pre-stim deltaQ per site/quartet
 
 % ---- Defaults ----
 optsMovie = struct();
@@ -73,6 +77,7 @@ optsMovie.alphaValueMinScale = 0.03;
 optsMovie.alphaFloorSoft = 0.20;
 optsMovie.hotScale = true;
 optsMovie.colorHotMaxFactor = 3.0;
+optsMovie.colorRedAt = 0.2;
 optsMovie.preStimCalibratedAlpha = true;
 optsMovie.preStimPercentile = 99.7;
 optsMovie.cMaxFixed = [];
@@ -80,6 +85,9 @@ optsMovie.alphaValueFloorFixed = [];
 optsMovie.useSiteScale = false;
 optsMovie.siteScaleLateWindow = [300 500];
 optsMovie.siteScaleStat = 'mean_plus_sd';
+optsMovie.denMin = 1e-3;
+optsMovie.alphaFullAt = 0.2;
+optsMovie.subtractPreStimBaseline = true;
 
 % ---- Parse name/value ----
 if mod(numel(varargin),2) ~= 0
@@ -112,33 +120,46 @@ if size(R_resp.meanAct,3) ~= nFrames
         size(R_resp.meanAct,3), nFrames);
 end
 
-if ~isstruct(OUT3) || ~isfield(OUT3,'pValueTD')
-    error('OUT3 must contain pValueTD for fixed significance masking.');
+if ~isstruct(OUT3) || ~isfield(OUT3,'pValueTD') || ~isfield(OUT3,'muT') || ~isfield(OUT3,'muD')
+    error('OUT3 must contain pValueTD, muT and muD for fixed masking and normalization.');
 end
 if numel(OUT3.pValueTD) < max(optsMovie.siteRange)
     error('OUT3.pValueTD is smaller than max(siteRange).');
 end
 
 siteRange = optsMovie.siteRange(:)';
-sigMask = isfinite(OUT3.pValueTD(siteRange)) & (OUT3.pValueTD(siteRange) < optsMovie.pThresh);
-nSigSites = nnz(sigMask);
+if optsMovie.neighborN > 1 && optsMovie.verbose
+    warning(['RF-space smoothing is disabled for this movie path. ' ...
+             'Forcing neighborN=1; smoothing is post-affine only.']);
+end
+optsMovie.neighborN = 1;
 
-% RF-center neighbor map (visual space) for smoothing
-Tref = Tall_V1(stimID_example).T;
-[rfX, rfY] = get_rf_centers(Tref, siteRange);
-neighborIdx = compute_neighbor_idx(rfX, rfY, sigMask, optsMovie.neighborN);
+sigMaskRaw = isfinite(OUT3.pValueTD(siteRange)) & (OUT3.pValueTD(siteRange) < optsMovie.pThresh);
+den = abs(double(OUT3.muT(siteRange)) - double(OUT3.muD(siteRange)));
+validDen = isfinite(den) & (den >= optsMovie.denMin);
+sigMask = sigMaskRaw & validDen;
+nSigSites = nnz(sigMask);
+nSigRaw = nnz(sigMaskRaw);
+nBadDen = nnz(sigMaskRaw & ~validDen);
+
+OUTplot = OUT3;
+badGlobal = siteRange(sigMaskRaw & ~validDen);
+OUTplot.pValueTD(badGlobal) = NaN;
 
 if optsMovie.verbose
     fprintf('\n============================================\n');
     fprintf('Starting attention-effect movie rendering (%d frames)\n', nFrames);
     fprintf('Output file: %s\n', outFile);
     fprintf('Example stimulus: %d\n', stimID_example);
-    fprintf('Significant sites (fixed mask): %d / %d\n', nSigSites, numel(siteRange));
-    fprintf('Neighbor smoothing: N=%d (RF-center distance)\n', optsMovie.neighborN);
+    fprintf('Significant sites (fixed mask): %d / %d\n', nSigRaw, numel(siteRange));
+    fprintf('Valid normalization denominator (|muT-muD| >= %.4g): %d / %d\n', ...
+        optsMovie.denMin, nnz(validDen), numel(siteRange));
+    fprintf('Significant + valid sites used in movie: %d / %d (excluded by denominator: %d)\n', ...
+        nSigSites, numel(siteRange), nBadDen);
+    fprintf('Neighbor smoothing: disabled in RF space\n');
     fprintf('Pixel neighbor averaging: N=%d (post-affine)\n', optsMovie.pixelNeighborN);
     fprintf('Pixel smoothing sigma: %.3g px (post-affine)\n', optsMovie.pixelSmoothSigma);
-    fprintf('Value-based alpha: %d (gamma=%g, minScale=%g)\n', ...
-        optsMovie.alphaByValue, optsMovie.alphaValueGamma, optsMovie.alphaValueMinScale);
+    fprintf('Alpha full at normalized value: %.4g\n', optsMovie.alphaFullAt);
     fprintf('============================================\n');
 end
 
@@ -171,20 +192,47 @@ end
 
 deltaQ_byFrame = cell(nFrames,1);
 deltaAbs = [];
-frameStrength = nan(nFrames,1);
 preStimVals = [];
 siteScale = [];
 tp = tic;
 for tb = 1:nFrames
     deltaQ = compute_deltaQ_quartet(tb, R_resp, Tall_V1, SNRnorm, siteRange, quartetMembers, optsMovie.excludeOverlap);
+    deltaQ = bsxfun(@rdivide, deltaQ, den);
+    deltaQ(~validDen, :) = NaN;
     deltaQ_byFrame{tb} = deltaQ;
+end
 
+% Optional baseline centering: subtract mean pre-stim activity per site/quartet.
+if optsMovie.subtractPreStimBaseline
+    preFrames = find(R_resp.timeWindows(:,2) <= 0);
+    if ~isempty(preFrames)
+        preStack = nan(numel(siteRange), nQuartets, numel(preFrames));
+        for k = 1:numel(preFrames)
+            preStack(:,:,k) = deltaQ_byFrame{preFrames(k)};
+        end
+        baseQ = mean(preStack, 3, 'omitnan');
+        for tb = 1:nFrames
+            dq = deltaQ_byFrame{tb};
+            dq = dq - baseQ;
+            deltaQ_byFrame{tb} = dq;
+        end
+        if optsMovie.verbose
+            fprintf('Applied pre-stim baseline subtraction using %d frames (end<=0 ms).\n', numel(preFrames));
+        end
+    else
+        if optsMovie.verbose
+            fprintf('Pre-stim baseline subtraction skipped: no frames with end<=0 ms.\n');
+        end
+    end
+end
+
+for tb = 1:nFrames
+    deltaQ = deltaQ_byFrame{tb};
     d = abs(deltaQ(sigMask, :));
     d = d(:);
     d = d(isfinite(d));
     if ~isempty(d)
         deltaAbs = [deltaAbs; d]; %#ok<AGROW>
-        frameStrength(tb) = prctile(d, optsMovie.robustPct);
         if R_resp.timeWindows(tb,2) <= 0
             preStimVals = [preStimVals; d]; %#ok<AGROW>
         end
@@ -203,16 +251,8 @@ for tb = 1:nFrames
     end
 end
 
-% ---- Optional per-site scaling from late-phase windows ----
-if optsMovie.useSiteScale
-    try
-        siteScale = compute_site_scale_late(R_resp, Tall_V1, SNRnorm, siteRange, ...
-            optsMovie.siteScaleLateWindow, optsMovie.excludeOverlap, optsMovie.siteScaleStat);
-    catch ME
-        warning('Site-scale computation failed: %s', ME.message);
-        siteScale = [];
-    end
-end
+% Keep hook disabled by default; movie normalization is fixed to OUT3 delta.
+siteScale = [];
 
 if ~isempty(optsMovie.cMaxFixed) && isfinite(optsMovie.cMaxFixed) && optsMovie.cMaxFixed > 0
     cShared = optsMovie.cMaxFixed;
@@ -233,32 +273,21 @@ end
 if optsMovie.verbose
     fprintf('Shared color scale cMax: %.6g\n', cShared);
 end
-if optsMovie.useSiteScale && ~isempty(siteScale) && optsMovie.verbose
-    fprintf('Using per-site scaling from late window [%d %d] ms (%s).\n', ...
-        optsMovie.siteScaleLateWindow(1), optsMovie.siteScaleLateWindow(2), optsMovie.siteScaleStat);
-end
-
-if ~isempty(optsMovie.alphaValueFloorFixed) && isfinite(optsMovie.alphaValueFloorFixed) && optsMovie.alphaValueFloorFixed >= 0
-    alphaFloor = optsMovie.alphaValueFloorFixed;
-    if optsMovie.verbose
-        fprintf('Using fixed alpha floor: %.6g\n', alphaFloor);
-    end
-else
-    alphaFloor = 0;
-    if optsMovie.preStimCalibratedAlpha
-        if isempty(preStimVals)
-            alphaFloor = 0;
-            if optsMovie.verbose
-                fprintf('Pre-stim alpha floor disabled: no pre-stim values found.\n');
-            end
-        else
-            alphaFloor = prctile(preStimVals, optsMovie.preStimPercentile);
-            if ~isfinite(alphaFloor) || alphaFloor < 0
-                alphaFloor = 0;
-            end
-            if optsMovie.verbose
-                fprintf('Pre-stim alpha floor: p%d = %.6g\n', optsMovie.preStimPercentile, alphaFloor);
-            end
+alphaFloor = 0;
+valueFloor = 0;
+if optsMovie.preStimCalibratedAlpha
+    if isempty(preStimVals)
+        valueFloor = 0;
+        if optsMovie.verbose
+            fprintf('Value floor from pre-stim: disabled (no pre-stim values).\n');
+        end
+    else
+        valueFloor = prctile(preStimVals, optsMovie.preStimPercentile);
+        if ~isfinite(valueFloor) || valueFloor < 0
+            valueFloor = 0;
+        end
+        if optsMovie.verbose
+            fprintf('Value floor from pre-stim p%d: %.6g\n', optsMovie.preStimPercentile, valueFloor);
         end
     end
 end
@@ -293,36 +322,34 @@ for tb = 1:nFrames
     optsPlot.pThresh = optsMovie.pThresh;
     optsPlot.siteRange = siteRange;
     optsPlot.markerSize = optsMovie.markerSize;
-    optsPlot.alpha = optsMovie.alpha;
+    optsPlot.alpha = 1;
     optsPlot.robustPct = optsMovie.robustPct;
     optsPlot.stimIdx = optsMovie.stimIdx;
-    if optsMovie.useSiteScale && ~isempty(siteScale)
-        optsPlot.cMaxFixed = 1;
-        optsPlot.siteScale = siteScale;
-    else
-        optsPlot.cMaxFixed = cShared;
-        optsPlot.siteScale = [];
-    end
+    optsPlot.cMaxFixed = cShared;
+    optsPlot.siteScale = [];
     optsPlot.bgColor = optsMovie.bgColor;
     optsPlot.cLow = optsMovie.cLow;
     optsPlot.cHigh = optsMovie.cHigh;
     optsPlot.projectionMode = 'quartet_pooled';
     optsPlot.deltaQ = deltaQ_byFrame{tb};
     optsPlot.stimToQuartet = stimToQuartet;
-    optsPlot.neighborN = optsMovie.neighborN;
+    optsPlot.neighborN = 1;
     optsPlot.pixelNeighborN = optsMovie.pixelNeighborN;
     optsPlot.pixelSmoothSigma = optsMovie.pixelSmoothSigma;
-    optsPlot.neighborIdx = neighborIdx;
+    optsPlot.neighborIdx = [];
     optsPlot.alphaByValue = optsMovie.alphaByValue;
-    optsPlot.alphaValueGamma = optsMovie.alphaValueGamma;
-    optsPlot.alphaValueMinScale = optsMovie.alphaValueMinScale;
-    optsPlot.alphaFloorSoft = optsMovie.alphaFloorSoft;
+    optsPlot.alphaValueGamma = 1;
+    optsPlot.alphaValueMinScale = 0;
+    optsPlot.alphaFloorSoft = 0;
     optsPlot.alphaValueFloor = alphaFloor;
+    optsPlot.alphaFullAt = optsMovie.alphaFullAt;
+    optsPlot.valueFloor = valueFloor;
     optsPlot.hotScale = optsMovie.hotScale;
     optsPlot.colorHotMaxFactor = optsMovie.colorHotMaxFactor;
+    optsPlot.colorRedAt = optsMovie.colorRedAt;
 
     h = plot_projected_attentiondiff_on_example_stim( ...
-        stimID_example, OUT3, Tall_V1, ALLCOORDS, optsPlot);
+        stimID_example, OUTplot, Tall_V1, ALLCOORDS, optsPlot);
 
     % Optional: hide stimulus outlines in pre-zero frames
     isPreZero = (R_resp.timeWindows(tb,2) <= 0);
