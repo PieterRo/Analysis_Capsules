@@ -15,6 +15,8 @@ p.addParameter('CovarianceShrinkage', 0.1, ...
     @(x) isnumeric(x) && isscalar(x) && x >= 0 && x <= 1);
 p.addParameter('MinSitesPerQuartet', 20, ...
     @(x) isnumeric(x) && isscalar(x) && x >= 0 && x == floor(x));
+p.addParameter('ResponseCentering', 'global', ...
+    @(x) ischar(x) || (isstring(x) && isscalar(x)));
 p.addParameter('Days', [1 2], @(x) isnumeric(x) && isvector(x) && ~isempty(x));
 p.addParameter('OnlyCorrect', true, @(x) islogical(x) && isscalar(x));
 p.addParameter('ExcludeOverlap', true, @(x) islogical(x) && isscalar(x));
@@ -24,6 +26,8 @@ p.addParameter('SaveOutputs', true, @(x) islogical(x) && isscalar(x));
 p.addParameter('MakeFigure', true, @(x) islogical(x) && isscalar(x));
 p.parse(varargin{:});
 opt = p.Results;
+responseCentering = validatestring(lower(char(opt.ResponseCentering)), ...
+    {'global', 'quartet'});
 
 cfg = config();
 globalSites = (513:768).';
@@ -106,6 +110,7 @@ assert(numel(tb) == nTimes, 'tb and normMUA time dimensions differ.');
 assert(size(ALLMAT, 2) >= 11, 'Expected the 11-column Nilson ALLMAT format.');
 
 stimPerTrial = ALLMAT(:, 1);
+trialQuartet = stimulusToQuartet(stimPerTrial);
 includeTrial = ismember(ALLMAT(:, 11), opt.Days(:));
 if opt.OnlyCorrect
     includeTrial = includeTrial & ALLMAT(:, 9) == 1;
@@ -126,7 +131,7 @@ if ~any(covarianceMask)
 end
 covarianceSamples = find(covarianceMask);
 
-centeredResponseByTrial = nan(nSites, nTrials);
+normalizedResponseByTrial = nan(nSites, nTrials);
 prestimResponseByTrial = nan(numel(eligibleSites), nTrials);
 
 fprintf(['V4 full-Fisher attention decoder: reading %d trials in chunks of %d ' ...
@@ -144,8 +149,8 @@ for firstTrial = 1:opt.ChunkTrials:nTrials
     raw = double(m1.normMUA(globalSites, trialRange, timeSamples));
     trialResponse = mean(raw, 3, 'omitnan');
     normalizedResponse = (trialResponse - baseline) ./ responseScale;
-    centeredResponseByTrial(:, trialRange(localInclude)) = ...
-        normalizedResponse(:, localInclude) - responseMidpoint;
+    normalizedResponseByTrial(:, trialRange(localInclude)) = ...
+        normalizedResponse(:, localInclude);
 
     rawPrestim = double(m1.normMUA(globalSites, trialRange, covarianceSamples));
     prestimResponse = mean(rawPrestim, 3, 'omitnan');
@@ -156,6 +161,16 @@ for firstTrial = 1:opt.ChunkTrials:nTrials
         prestimResponse(:, localInclude);
 
     fprintf('  trials %d-%d of %d\n', firstTrial, lastTrial, nTrials);
+end
+
+if strcmp(responseCentering, 'quartet')
+    [centeredResponseByTrial, quartetMeanResponse, quartetTrialCount] = ...
+        subtract_quartet_mean_response(normalizedResponseByTrial, ...
+        trialQuartet, includeTrial, nQuartets);
+else
+    centeredResponseByTrial = normalizedResponseByTrial - responseMidpoint;
+    quartetMeanResponse = [];
+    quartetTrialCount = [];
 end
 
 covarianceTrial = includeTrial & all(isfinite(prestimResponseByTrial), 1)';
@@ -251,7 +266,6 @@ for globalTrial = find(includeTrial)'
 end
 
 finiteScoreTrial = includeTrial & isfinite(S);
-trialQuartet = stimulusToQuartet(stimPerTrial);
 coverageTrial = false(nTrials, 1);
 validQuartet = trialQuartet >= 1 & trialQuartet <= nQuartets;
 coverageTrial(validQuartet) = ...
@@ -282,6 +296,9 @@ OUT.covarianceWindowRequested = opt.CovarianceWindow;
 OUT.covarianceWindowSampled = ...
     [tb(covarianceSamples(1)), tb(covarianceSamples(end))];
 OUT.covarianceShrinkage = opt.CovarianceShrinkage;
+OUT.responseCentering = responseCentering;
+OUT.quartetMeanResponse = quartetMeanResponse;
+OUT.quartetMeanTrialCount = quartetTrialCount;
 OUT.minSitesPerQuartet = opt.MinSitesPerQuartet;
 OUT.quartetSiteCount = quartetSiteCount;
 OUT.includedQuartet = find(quartetSiteCount >= opt.MinSitesPerQuartet);
@@ -328,6 +345,7 @@ fprintf('  Visually driven sites (bestSNR > %.2f): %d / %d\n', ...
     opt.SNRThreshold, nnz(visuallyDriven), nSites);
 fprintf('  Sites with a finite attention weight: %d / %d\n', ...
     nnz(eligibleSite), nSites);
+fprintf('  Response centering: %s\n', responseCentering);
 fprintf('  Scored trials: %d / %d included (%d without eligible curve sites)\n', ...
     nScored, OUT.nIncluded, OUT.nWithoutFiniteScore);
 fprintf('  Minimum sites per quartet: %d (%d trials below threshold)\n', ...
@@ -349,9 +367,10 @@ if opt.MakeFigure
     xline(0, '--', 'Color', [0.75 0.12 0.12], 'LineWidth', 1.8);
     xlabel('Attention score S');
     ylabel('Probability');
-    title(sprintf(['Nilson V4 full Fisher, %g-%g ms: P(S > 0) = ' ...
-        '%.1f%% (%d/%d); N = %d quartets'], opt.ResponseWindow(1), ...
-        opt.ResponseWindow(2), 100 * accuracy, nCorrect, nScored, ...
+    title(sprintf(['Nilson V4 full Fisher, %s-centered, %g-%g ms: P(S > 0) = ' ...
+        '%.1f%% (%d/%d); N = %d quartets'], responseCentering, ...
+        opt.ResponseWindow(1), opt.ResponseWindow(2), ...
+        100 * accuracy, nCorrect, nScored, ...
         numel(OUT.includedQuartet)));
     box off;
     grid on;
@@ -366,10 +385,14 @@ if opt.SaveOutputs
         mkdir(cfg.resultsDir);
     end
     thresholdLabel = sprintf('minSites%d', opt.MinSitesPerQuartet);
+    analysisLabel = thresholdLabel;
+    if strcmp(responseCentering, 'quartet')
+        analysisLabel = sprintf('%s_quartetCentered', analysisLabel);
+    end
     resultFile = fullfile(cfg.resultsDir, sprintf( ...
-        'Attention_decoder_V4_fullFisher_%s_N.mat', thresholdLabel));
+        'Attention_decoder_V4_fullFisher_%s_N.mat', analysisLabel));
     figureFile = fullfile(cfg.resultsDir, sprintf( ...
-        'Attention_decoder_V4_fullFisher_%s_N.png', thresholdLabel));
+        'Attention_decoder_V4_fullFisher_%s_N.png', analysisLabel));
     OUT.resultFile = resultFile;
     OUT.figureFile = figureFile;
 

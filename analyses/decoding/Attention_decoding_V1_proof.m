@@ -21,6 +21,8 @@ p.addParameter('CurveMarginDeg', 0, ...
     @(x) isnumeric(x) && isscalar(x) && isfinite(x) && x >= 0);
 p.addParameter('PixelsPerDegree', [], ...
     @(x) isempty(x) || (isnumeric(x) && isscalar(x) && isfinite(x) && x > 0));
+p.addParameter('ResponseCentering', 'global', ...
+    @(x) ischar(x) || (isstring(x) && isscalar(x)));
 p.addParameter('Days', [1 2], @(x) isnumeric(x) && isvector(x) && ~isempty(x));
 p.addParameter('OnlyCorrect', true, @(x) islogical(x) && isscalar(x));
 p.addParameter('ExcludeOverlap', true, @(x) islogical(x) && isscalar(x));
@@ -30,6 +32,8 @@ p.addParameter('SaveOutputs', true, @(x) islogical(x) && isscalar(x));
 p.addParameter('MakeFigure', true, @(x) islogical(x) && isscalar(x));
 p.parse(varargin{:});
 opt = p.Results;
+responseCentering = validatestring(lower(char(opt.ResponseCentering)), ...
+    {'global', 'quartet'});
 
 cfg = config();
 
@@ -119,6 +123,7 @@ assert(numel(tb) == nTimes, 'tb and normMUA time dimensions differ.');
 assert(size(ALLMAT, 2) >= 11, 'Expected the 11-column Nilson ALLMAT format.');
 
 stimPerTrial = ALLMAT(:, 1);
+trialQuartet = stimulusToQuartet(stimPerTrial);
 includeTrial = ismember(ALLMAT(:, 11), opt.Days(:));
 if opt.OnlyCorrect
     includeTrial = includeTrial & ALLMAT(:, 9) == 1;
@@ -145,7 +150,7 @@ nTargetSites = zeros(nTrials, 1);
 nDistractorSites = zeros(nTrials, 1);
 sumAbsWeight = nan(nTrials, 1);
 sumAbsFisherWeight = nan(nTrials, 1);
-centeredResponseByTrial = nan(512, nTrials);
+normalizedResponseByTrial = nan(512, nTrials);
 prestimResponseByTrial = nan(numel(eligibleSites), nTrials);
 
 fprintf(['V1 attention proof-of-principle: reading %d trials in chunks of %d ' ...
@@ -161,6 +166,9 @@ for firstTrial = 1:opt.ChunkTrials:nTrials
 
     raw = double(m1.normMUA(1:512, trialRange, timeSamples));
     trialResponse = mean(raw, 3, 'omitnan');
+    normalizedResponse = (trialResponse - baseline) ./ responseScale;
+    normalizedResponseByTrial(:, trialRange(localInclude)) = ...
+        normalizedResponse(:, localInclude);
     rawPrestim = double(m1.normMUA(1:512, trialRange, covarianceSamples));
     prestimResponse = mean(rawPrestim, 3, 'omitnan');
     prestimResponse = prestimResponse(eligibleSites, :);
@@ -169,46 +177,17 @@ for firstTrial = 1:opt.ChunkTrials:nTrials
     prestimResponseByTrial(:, trialRange(localInclude)) = ...
         prestimResponse(:, localInclude);
 
-    localTrials = find(localInclude);
-    for jj = localTrials(:)'
-        globalTrial = trialRange(jj);
-        stimNum = stimPerTrial(globalTrial);
-        isTarget = targetByStimulus(:, stimNum);
-        isDistractor = distractorByStimulus(:, stimNum);
-        onCurve = isTarget | isDistractor;
-
-        if opt.ExcludeOverlap
-            notOverlap = ~overlapByStimulus(:, stimNum);
-        else
-            notOverlap = true(512, 1);
-        end
-
-        normalizedResponse = (trialResponse(:, jj) - baseline) ./ responseScale;
-        centeredResponse = normalizedResponse - responseMidpoint;
-        centeredResponseByTrial(:, globalTrial) = centeredResponse;
-        use = eligibleSite & onCurve & notOverlap & isfinite(centeredResponse);
-
-        role = zeros(512, 1);
-        role(isTarget) = 1;
-        role(isDistractor) = -1;
-        effectiveWeight = dprime .* role;
-        denominator = sum(abs(dprime(use)));
-        effectiveFisherWeight = fisherWeight .* role;
-        fisherDenominator = sum(abs(fisherWeight(use)));
-
-        if denominator > 0 && fisherDenominator > 0
-            S(globalTrial) = sum(effectiveWeight(use) .* centeredResponse(use)) / denominator;
-            SFisher(globalTrial) = ...
-                sum(effectiveFisherWeight(use) .* centeredResponse(use)) / fisherDenominator;
-            nSitesUsed(globalTrial) = nnz(use);
-            nTargetSites(globalTrial) = nnz(use & isTarget);
-            nDistractorSites(globalTrial) = nnz(use & isDistractor);
-            sumAbsWeight(globalTrial) = denominator;
-            sumAbsFisherWeight(globalTrial) = fisherDenominator;
-        end
-    end
-
     fprintf('  trials %d-%d of %d\n', firstTrial, lastTrial, nTrials);
+end
+
+if strcmp(responseCentering, 'quartet')
+    [centeredResponseByTrial, quartetMeanResponse, quartetMeanTrialCount] = ...
+        subtract_quartet_mean_response(normalizedResponseByTrial, ...
+        trialQuartet, includeTrial, 96);
+else
+    centeredResponseByTrial = normalizedResponseByTrial - responseMidpoint;
+    quartetMeanResponse = [];
+    quartetMeanTrialCount = [];
 end
 
 covarianceTrial = includeTrial & all(isfinite(prestimResponseByTrial), 1)';
@@ -274,6 +253,37 @@ end
 
 for globalTrial = find(includeTrial)'
     stimNum = stimPerTrial(globalTrial);
+    isTarget = targetByStimulus(:, stimNum);
+    isDistractor = distractorByStimulus(:, stimNum);
+    onCurve = isTarget | isDistractor;
+    if opt.ExcludeOverlap
+        notOverlap = ~overlapByStimulus(:, stimNum);
+    else
+        notOverlap = true(512, 1);
+    end
+
+    centeredResponse = centeredResponseByTrial(:, globalTrial);
+    use = eligibleSite & onCurve & notOverlap & isfinite(centeredResponse);
+    role = zeros(512, 1);
+    role(isTarget) = 1;
+    role(isDistractor) = -1;
+    effectiveWeight = dprime .* role;
+    denominator = sum(abs(dprime(use)));
+    effectiveFisherWeight = fisherWeight .* role;
+    fisherDenominator = sum(abs(fisherWeight(use)));
+    if denominator > 0 && fisherDenominator > 0
+        S(globalTrial) = ...
+            sum(effectiveWeight(use) .* centeredResponse(use)) / denominator;
+        SFisher(globalTrial) = ...
+            sum(effectiveFisherWeight(use) .* centeredResponse(use)) / ...
+            fisherDenominator;
+        nSitesUsed(globalTrial) = nnz(use);
+        nTargetSites(globalTrial) = nnz(use & isTarget);
+        nDistractorSites(globalTrial) = nnz(use & isDistractor);
+        sumAbsWeight(globalTrial) = denominator;
+        sumAbsFisherWeight(globalTrial) = fisherDenominator;
+    end
+
     siteIdx = fullSiteByStimulus{stimNum};
     weight = fullWeightByStimulus{stimNum};
     denominator = fullDenominatorByStimulus(stimNum);
@@ -293,7 +303,6 @@ end
 
 finiteScoreTrial = includeTrial & isfinite(S) & isfinite(SFisher) & ...
     isfinite(SFullFisher);
-trialQuartet = stimulusToQuartet(stimPerTrial);
 coverageTrial = false(nTrials, 1);
 validQuartet = trialQuartet >= 1 & trialQuartet <= 96;
 coverageTrial(validQuartet) = ...
@@ -328,6 +337,9 @@ OUT.covarianceWindowRequested = opt.CovarianceWindow;
 OUT.covarianceWindowSampled = ...
     [tb(covarianceSamples(1)), tb(covarianceSamples(end))];
 OUT.covarianceShrinkage = opt.CovarianceShrinkage;
+OUT.responseCentering = responseCentering;
+OUT.quartetMeanResponse = quartetMeanResponse;
+OUT.quartetMeanTrialCount = quartetMeanTrialCount;
 OUT.curveMarginDeg = opt.CurveMarginDeg;
 OUT.curveMarginPx = curveMarginPx;
 OUT.pixelsPerDegree = pixelsPerDegree;
@@ -385,6 +397,7 @@ fprintf('\nV1 attention proof-of-principle\n');
 fprintf('  Visually driven sites (bestSNR > %.2f): %d / 512\n', ...
     opt.SNRThreshold, nnz(visuallyDriven));
 fprintf('  Sites with a finite attention weight: %d / 512\n', nnz(eligibleSite));
+fprintf('  Response centering: %s\n', responseCentering);
 fprintf('  Curve margin: %.2f deg (%.2f px beyond the capsule edge)\n', ...
     opt.CurveMarginDeg, curveMarginPx);
 fprintf('  Scored trials: %d / %d included (%d without eligible curve sites)\n', ...
@@ -447,9 +460,10 @@ if opt.MakeFigure
     grid on;
     set(gca, 'FontSize', 12, 'Layer', 'top');
 
-    sgtitle(sprintf(['Nilson V1 attention read-out, %g-%g ms; %.1f deg margin; ' ...
+    sgtitle(sprintf(['Nilson V1 attention read-out, %s-centered, %g-%g ms; ' ...
+        '%.1f deg margin; ' ...
         'quartets with at least %d sites (N = %d)'], ...
-        opt.ResponseWindow(1), opt.ResponseWindow(2), ...
+        responseCentering, opt.ResponseWindow(1), opt.ResponseWindow(2), ...
         opt.CurveMarginDeg, opt.MinSitesPerQuartet, ...
         numel(OUT.includedQuartet)), ...
         'FontWeight', 'bold');
@@ -465,6 +479,9 @@ if opt.SaveOutputs
     thresholdLabel = sprintf('minSites%d', opt.MinSitesPerQuartet);
     marginLabel = strrep(sprintf('%g', opt.CurveMarginDeg), '.', 'p');
     analysisLabel = sprintf('margin%sdeg_%s', marginLabel, thresholdLabel);
+    if strcmp(responseCentering, 'quartet')
+        analysisLabel = sprintf('%s_quartetCentered', analysisLabel);
+    end
     resultFile = fullfile(cfg.resultsDir, sprintf( ...
         'Attention_decoder_V1_proof_%s_N.mat', analysisLabel));
     figureFile = fullfile(cfg.resultsDir, sprintf( ...
