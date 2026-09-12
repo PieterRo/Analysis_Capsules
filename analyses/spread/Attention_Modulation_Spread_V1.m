@@ -1,0 +1,89 @@
+% Attention_Modulation_Spread_V1
+% Spatial V1 target-minus-distractor d-prime, including background RFs.
+
+scriptDir = fileparts(mfilename('fullpath'));
+repoRoot = fileparts(fileparts(scriptDir));
+addpath(repoRoot);
+addpath(genpath(fullfile(repoRoot, 'analyses')));
+addpath(genpath(fullfile(repoRoot, 'core')));
+addpath(genpath(fullfile(repoRoot, 'utils')));
+
+cfg = config();
+P = struct();
+P.timeIdx = 3;
+P.windowMs = [300 500];
+P.exampleStimulus = 38;
+P.pThresh = 0.05;
+P.smoothSigmaPx = 15;
+P.smoothSupportFraction = 0.01;
+P.framePaddingPx = 100;
+P.clipRange = [-0.5 0.5];
+P.alphaGain = 2.5;
+P.contourLineWidth = 4;
+P.saveFigure = false;
+
+load(fullfile(cfg.logsDir, 'ObjAtt_lines_monkeyN_20220201_B1.mat')); % ALLCOORDS
+load(fullfile(cfg.logsDir, 'RTAB384.mat'));                         % RTAB384
+S = load(fullfile(cfg.matDir, 'Tall_V1_lines_N.mat'));
+Tall_V1 = S.Tall_V1;
+S = load(fullfile(cfg.matDir, 'SNR_capsules_N_d12.mat'));
+R3 = S.R;
+S = load(fullfile(cfg.matDir, 'SNR_V1_byColor_byWindow.mat'));
+SNRnorm = S.SNR;
+
+R3V1 = R3;
+R3V1.meanAct = R3.meanAct(1:512,:,:);
+R3V1.meanSqAct = R3.meanSqAct(1:512,:,:);
+if ~isvector(R3.nTrials)
+    R3V1.nTrials = R3.nTrials(1:512,:);
+end
+
+assert(isequal(double(R3.timeWindows(P.timeIdx,:)), P.windowMs), ...
+    'Expected the selected response bin to be 300-500 ms.');
+optsTD = struct('v1Sites', 1:512, 'timeIdx', P.timeIdx, ...
+    'excludeOverlap', true, 'verbose', false);
+OUTattention = attention_modulation_V1_3bin(R3V1, Tall_V1, SNRnorm, optsTD);
+keepSites = find(isfinite(OUTattention.pValueTD) & ...
+    OUTattention.pValueTD<P.pThresh & isfinite(OUTattention.dprime));
+
+fprintf('Attention-significant V1 sites (pTD < %.3f): %d / 512\n', ...
+    P.pThresh, numel(keepSites));
+fprintf('Pooled V1 d-prime range at included sites: [%.4g %.4g]\n', ...
+    min(OUTattention.dprime(keepSites)), max(OUTattention.dprime(keepSites)));
+
+hAttentionSpread = plot_projected_attention_dprime_on_example_stim( ...
+    Tall_V1, ALLCOORDS, RTAB384, P.exampleStimulus, R3V1, SNRnorm, ...
+    'TimeBin', P.timeIdx, ...
+    'SiteIdx', keepSites, ...
+    'CoverageSiteIdx', (1:512).', ...
+    'ExcludeOverlap', true, ...
+    'SmoothSigmaPx', P.smoothSigmaPx, ...
+    'SmoothSupportFraction', P.smoothSupportFraction, ...
+    'FramePaddingPx', P.framePaddingPx, ...
+    'ClipRange', P.clipRange, ...
+    'AlphaGain', P.alphaGain, ...
+    'ContourLineWidth', P.contourLineWidth);
+
+label = sprintf('V1 | T-D d'' | %.0f-%.0f ms', P.windowMs);
+text(hAttentionSpread.ax, hAttentionSpread.xLimits(1)+14, ...
+    hAttentionSpread.yLimits(1)+14, label, ...
+    'HorizontalAlignment', 'left', 'VerticalAlignment', 'top', ...
+    'FontName', 'Helvetica', 'FontSize', 16, 'FontWeight', 'bold', ...
+    'Color', [0.1 0.1 0.1]);
+text(hAttentionSpread.ax, hAttentionSpread.xLimits(2)-14, ...
+    hAttentionSpread.yLimits(2)-14, ...
+    sprintf('N = %d projected points', hAttentionSpread.nRasterPoints), ...
+    'HorizontalAlignment', 'right', 'VerticalAlignment', 'bottom', ...
+    'FontName', 'Helvetica', 'FontSize', 12, ...
+    'Color', [0.25 0.25 0.25]);
+set(hAttentionSpread.fig, 'Name', 'V1 attentional modulation spread', ...
+    'NumberTitle', 'off', 'InvertHardcopy', 'off');
+
+if P.saveFigure
+    outDir = fullfile(cfg.resultsDir, 'spread');
+    if exist(outDir, 'dir')~=7, mkdir(outDir); end
+    stem = 'V1_attentional_modulation_dprime_300_500ms';
+    savefig(hAttentionSpread.fig, fullfile(outDir,[stem '.fig']));
+    print(hAttentionSpread.fig, fullfile(outDir,[stem '.png']), ...
+        '-dpng','-r300');
+end

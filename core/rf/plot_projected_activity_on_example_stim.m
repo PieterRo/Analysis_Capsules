@@ -21,25 +21,50 @@ function h = plot_projected_activity_on_example_stim(Tall, ALLCOORDS, RTAB384, e
 %   'TimeBin'        (default 1)  : which of the 70 bins to use
 %   'UseOnlyV1'      (default true): use sites 1:512 only
 %   'SiteIdx'        (default []) : optional subset (indices within chosen site range)
+%   'CoverageSiteIdx' (default []): optional RF-coverage subset; defaults to SiteIdx
 %   'StimIdx'        (default []) : optional subset of stimuli to include (1..384)
 %   'OnlyOnObjects'  (default true): only plot target/distractor assigned sites
 %   'MarkerSize'     (default 12)
 %   'AlphaMax'       (default 0.85)
 %   'AlphaThresh'    (default 0.10) : normalized magnitude below this becomes fully transparent
 %   'ClipRange'      (default [-1.0 2.0]) : clip normalized values to this range before coloring
+%   'PlotMode'       (default 'scatter'): 'scatter' or density-normalized 'smoothed'
+%   'SmoothSigmaPx'  (default 15): Gaussian sigma in pixels for smoothed mode
+%   'SmoothSupportFraction' (default 0.01): minimum local weight relative to its peak
+%   'SmoothActivityAlphaGain' (default 1): display-only alpha gain for activity
+%   'SmoothFramePaddingPx' (default 0): white margin around the stimulus frame
+%   'CoverageColor'  (default [0.70 0.70 0.70]): neutral RF-coverage color
+%   'CoverageAlphaMax' (default 0.55): maximum opacity of RF coverage
+%   'ContourLineWidth' (default 2): target/distractor outline width in smoothed mode
 
 p = inputParser;
 p.addParameter('TimeBin', 1, @(x) isnumeric(x) && isscalar(x) && x>=1);
 p.addParameter('UseOnlyV1', true, @(x) islogical(x) && isscalar(x));
 p.addParameter('SiteIdx', [], @(x) isempty(x) || (isnumeric(x) && isvector(x)));
+p.addParameter('CoverageSiteIdx', [], ...
+    @(x) isempty(x) || (isnumeric(x) && isvector(x)));
 p.addParameter('StimIdx', [], @(x) isempty(x) || (isnumeric(x) && isvector(x)));
 p.addParameter('OnlyOnObjects', true, @(x) islogical(x) && isscalar(x));
 p.addParameter('MarkerSize', 12, @(x) isnumeric(x) && isscalar(x));
 p.addParameter('AlphaMax', 0.95, @(x) isnumeric(x) && isscalar(x));
 p.addParameter('AlphaThresh', 0.05, @(x) isnumeric(x) && isscalar(x));
 p.addParameter('ClipRange', [-1.0 2.0], @(x) isnumeric(x) && numel(x)==2);
+p.addParameter('PlotMode', 'scatter', @(x) ischar(x) || isstring(x));
+p.addParameter('SmoothSigmaPx', 15, @(x) isnumeric(x) && isscalar(x) && x>0);
+p.addParameter('SmoothSupportFraction', 0.01, ...
+    @(x) isnumeric(x) && isscalar(x) && x>0 && x<1);
+p.addParameter('SmoothActivityAlphaGain', 1, ...
+    @(x) isnumeric(x) && isscalar(x) && x>0);
+p.addParameter('SmoothFramePaddingPx', 0, ...
+    @(x) isnumeric(x) && isscalar(x) && isfinite(x) && x>=0);
+p.addParameter('CoverageColor', [0.70 0.70 0.70], ...
+    @(x) isnumeric(x) && numel(x)==3 && all(x>=0) && all(x<=1));
+p.addParameter('CoverageAlphaMax', 0.55, ...
+    @(x) isnumeric(x) && isscalar(x) && x>=0 && x<=1);
+p.addParameter('ContourLineWidth', 2, @(x) isnumeric(x) && isscalar(x) && x>0);
 p.parse(varargin{:});
 opt = p.Results;
+plotMode = validatestring(char(opt.PlotMode), {'scatter', 'smoothed'});
 
 W = 1024; H = 768;
 toPx = @(q) [q(1) + W/2, H/2 - q(2)];
@@ -78,6 +103,11 @@ if ~isempty(opt.SiteIdx)
 else
     sites = baseSites;
 end
+if ~isempty(opt.CoverageSiteIdx)
+    coverageSites = baseSites(opt.CoverageSiteIdx);
+else
+    coverageSites = sites;
+end
 
 % ---- Stimulus set ----
 if isempty(opt.StimIdx)
@@ -95,8 +125,13 @@ muTop   = max( [double(SNR.muYellowEarly(:)), double(SNR.muYellowLate(:)), ...
 scale = muTop - muSpont;
 scale(scale <= 1e-9) = 1e-9;
 
-% ---- Accumulators for scatter ----
-X = []; Y = []; C = []; A = [];
+% ---- Accumulators for projected samples ----
+X = []; Y = []; V = []; C = []; A = [];
+XCoverage = []; YCoverage = [];
+
+geom = struct('s_px', s_px, 'uT', uT, 'uD', uD, 'nT', nT, 'nD', nD, ...
+    'widthEx', widthEx, 'radEx', radEx, 'alphaEx', alphaEx, ...
+    'alphaLongEx', alphaLongEx, 'sgn', sgn);
 
 % To avoid double counting complementary pairs, only take the "lower" member of each pair.
 seenPair = false(384,1);
@@ -112,66 +147,16 @@ for stimNum = stimList
     if stimNum > numel(Tall) || ~isfield(Tall(stimNum),'T')
         continue;
     end
-    T = Tall(stimNum).T;
+    TAll = Tall(stimNum).T;
 
-    % Restrict rows to requested sites (assumes row order matches site index)
-    % If your table has a site-id column instead, swap this selection accordingly.
-    T = T(sites, :);
-
-    assign = string(T.assignment);
-
-    % Compute positions for target/distractor/background entries (same formulas)
-    x = nan(height(T),1);
-    y = nan(height(T),1);
-
-    % Target
-    idxT = (assign=="target") & ~isnan(T.along_GC);
-    if any(idxT)
-        along = T.along_GC(idxT) * widthEx;
-        perp  = T.perp_signed_GC(idxT) * widthEx;
-        pT = s_px + along.*uT + perp.*nT;
-        x(idxT) = pT(:,1); y(idxT) = pT(:,2);
-    end
-
-    % Distractor
-    idxD = (assign=="distractor") & ~isnan(T.along_GC);
-    if any(idxD)
-        along = T.along_GC(idxD) * widthEx;
-        perp  = T.perp_signed_GC(idxD) * widthEx;
-        pD = s_px + along.*uD + perp.*nD;
-        x(idxD) = pD(:,1); y(idxD) = pD(:,2);
-    end
-
-    % Background (edge-based arc)
-    idxB = (assign=="background") & ~isnan(T.r_s_GC);
-    if any(idxB)
-        r_px = T.r_s_GC(idxB) * widthEx;
-        frac = T.arc_frac_edge(idxB);
-        isIn = T.arc_isInner_edge(idxB);
-
-        r_eff = max(r_px, radEx + 1e-6);
-        Delta = asin(min(1, radEx ./ r_eff));
-
-        alphaFree     = alphaEx     - sgn*(Delta+Delta);
-        alphaLongFree = alphaLongEx + sgn*(Delta+Delta);
-
-        beta = zeros(size(frac));
-        beta(isIn)  =  sgn*Delta(isIn) + frac(isIn).*alphaFree(isIn);
-        beta(~isIn) = -sgn*Delta(~isIn) + frac(~isIn).*alphaLongFree(~isIn);
-
-        cb = cos(beta); sb = sin(beta);
-        vx = cb*uD(1) - sb*uD(2);
-        vy = sb*uD(1) + cb*uD(2);
-
-        pB = s_px + [r_px.*vx, r_px.*vy];
-        x(idxB) = pB(:,1); y(idxB) = pB(:,2);
-    end
-
-    % Optional: keep only object-assigned points
-    if opt.OnlyOnObjects
-        keep = (assign=="target") | (assign=="distractor");
-    else
-        keep = ~isnan(x) & ~isnan(y);
+    % Restrict response values to selected sites, while coverage may use all RFs.
+    [x, y, keep] = project_table_rows( ...
+        TAll(sites,:), geom, opt.OnlyOnObjects);
+    if strcmp(plotMode, 'smoothed')
+        [xCoverage, yCoverage, keepCoverage] = project_table_rows( ...
+            TAll(coverageSites,:), geom, opt.OnlyOnObjects);
+        XCoverage = [XCoverage; xCoverage(keepCoverage)];
+        YCoverage = [YCoverage; yCoverage(keepCoverage)];
     end
 
     if ~any(keep), continue; end
@@ -194,68 +179,113 @@ for stimNum = stimList
     % Keep only plotted points (same indexing as sites)
     X = [X; x(keep)];
     Y = [Y; y(keep)];
+    V = [V; z(keep)];
     C = [C; rgb(keep,:)];
     A = [A; alpha(keep)];
 end
 
 % ---- Plotting ----
-figure('Color',[0.5 0.5 0.5]);
+if strcmp(plotMode, 'smoothed')
+    figColor = [1 1 1];
+else
+    figColor = [0.5 0.5 0.5];
+end
+figure('Color', figColor);
 ax = axes('Position',[0 0 1 1]); hold(ax,'on');
-
-img = render_stim_from_ALLCOORDS(ALLCOORDS, RTAB384, exampleStimNum);
-imshow(img,'Parent',ax,'InitialMagnification','fit');
 set(ax,'Position',[0 0 1 1]);
-set(ax,'Color',[0.5 0.5 0.5]);
+set(ax,'Color', figColor);
 axis(ax,'ij');
 
-hSc = scatter(ax, X, Y, opt.MarkerSize, C, 'filled');
+smoothField = [];
+smoothWeight = [];
+coverageWeight = [];
+nRasterPoints = 0;
+nCoverageRasterPoints = 0;
 
-% ---- Transparency depends ONLY on activity magnitude (alpha from valueToColorAlpha) ----
-% A is per-point alpha computed from z (near 0 -> transparent; large |z| -> opaque).
-alphaValues = A(:);
-alphaValues(~isfinite(alphaValues)) = 0;
-alphaValues = max(0, min(1, alphaValues));
+if strcmp(plotMode, 'scatter')
+    img = render_stim_from_ALLCOORDS(ALLCOORDS, RTAB384, exampleStimNum);
+    imshow(img,'Parent',ax,'InitialMagnification','fit');
+    set(ax,'Position',[0 0 1 1]);
+    hSc = scatter(ax, X, Y, opt.MarkerSize, C, 'filled');
 
-% Apply (version-safe): prefer per-point alpha, fallback to uniform alpha.
-appliedPerPointAlpha = false;
-if isprop(hSc,'AlphaData') && isprop(hSc,'MarkerFaceAlpha')
-    try
-        hSc.MarkerFaceAlpha = 'flat';
-        hSc.AlphaData       = alphaValues;
-        if isprop(hSc,'AlphaDataMapping')
-            hSc.AlphaDataMapping = 'none';
+    % Transparency depends only on activity magnitude.
+    alphaValues = A(:);
+    alphaValues(~isfinite(alphaValues)) = 0;
+    alphaValues = max(0, min(1, alphaValues));
+
+    % Apply per-point alpha when supported; otherwise use uniform alpha.
+    appliedPerPointAlpha = false;
+    if isprop(hSc,'AlphaData') && isprop(hSc,'MarkerFaceAlpha')
+        try
+            hSc.MarkerFaceAlpha = 'flat';
+            hSc.AlphaData       = alphaValues;
+            if isprop(hSc,'AlphaDataMapping')
+                hSc.AlphaDataMapping = 'none';
+            end
+            if isprop(hSc,'MarkerEdgeAlpha')
+                hSc.MarkerEdgeAlpha = 'flat';
+            end
+            appliedPerPointAlpha = true;
+        catch
+            appliedPerPointAlpha = false;
+        end
+    end
+
+    if ~appliedPerPointAlpha
+        aMean = mean(alphaValues);
+        if isprop(hSc,'MarkerFaceAlpha')
+            hSc.MarkerFaceAlpha = aMean;
         end
         if isprop(hSc,'MarkerEdgeAlpha')
-            hSc.MarkerEdgeAlpha = 'flat';
+            hSc.MarkerEdgeAlpha = aMean;
         end
-        appliedPerPointAlpha = true;
-    catch
-        appliedPerPointAlpha = false;
     end
+
+    % Expand axes a bit to retain all projected scatter points.
+    xAll = [X; 1; W];
+    yAll = [Y; 1; H];
+    margin = 20;
+    xlim(ax, [min(xAll)-margin, max(xAll)+margin]);
+    ylim(ax, [min(yAll)-margin, max(yAll)+margin]);
+    axis(ax,'equal');
+    set(ax,'YDir','reverse');
+
+    hFrame = rectangle(ax,'Position',[0.5 0.5 W H], ...
+        'EdgeColor',[0.85 0.85 0.85], 'LineWidth',1);
+    uistack(hFrame,'top');
+else
+    [smoothField, smoothWeight, coverageWeight, rgbField, alphaField, ...
+        coverageAlpha, nRasterPoints, nCoverageRasterPoints, ...
+        displayXLim, displayYLim] = ...
+        smooth_projected_field(X, Y, V, XCoverage, YCoverage, W, H, ...
+            opt.SmoothSigmaPx, ...
+            opt.SmoothSupportFraction, opt.AlphaMax, opt.AlphaThresh, ...
+            opt.ClipRange, opt.SmoothActivityAlphaGain, ...
+            opt.CoverageAlphaMax, opt.SmoothFramePaddingPx);
+
+    coverageRGB = repmat(reshape(opt.CoverageColor, 1, 1, 3), ...
+        [size(coverageAlpha,1) size(coverageAlpha,2) 1]);
+    coverageRGB = uint8(round(255 * coverageRGB));
+    hCoverage = image(ax, displayXLim, displayYLim, coverageRGB);
+    set(hCoverage, 'AlphaData', single(coverageAlpha));
+
+    rgbDisplay = uint8(round(255 * rgbField));
+    hIm = image(ax, displayXLim, displayYLim, rgbDisplay);
+    set(hIm, 'AlphaData', single(alphaField));
+
+    [~, masks] = render_stim_with_masks2( ...
+        ALLCOORDS, RTAB384, exampleStimNum, 'Background', [1 1 1]);
+    contour(ax, double(masks.figArm), [0.5 0.5], '-', ...
+        'Color', [0.10 0.10 0.10], 'LineWidth', opt.ContourLineWidth);
+    contour(ax, double(masks.backArm), [0.5 0.5], '--', ...
+        'Color', [0.25 0.25 0.25], 'LineWidth', opt.ContourLineWidth);
+
+    xlim(ax, displayXLim);
+    ylim(ax, displayYLim);
+    axis(ax, 'image');
+    axis(ax, 'off');
+    set(ax, 'YDir', 'reverse');
 end
-
-if ~appliedPerPointAlpha
-    % Older MATLAB fallback: uniform alpha only
-    aMean = mean(alphaValues);
-    if isprop(hSc,'MarkerFaceAlpha')
-        hSc.MarkerFaceAlpha = aMean;
-    end
-    if isprop(hSc,'MarkerEdgeAlpha')
-        hSc.MarkerEdgeAlpha = aMean;
-    end
-end
-
-% Expand axes a bit
-xAll = [X; 1; W];
-yAll = [Y; 1; H];
-margin = 20;
-xlim(ax, [min(xAll)-margin, max(xAll)+margin]);
-ylim(ax, [min(yAll)-margin, max(yAll)+margin]);
-axis(ax,'equal');
-set(ax,'YDir','reverse');
-
-hFrame = rectangle(ax,'Position',[0.5 0.5 W H], 'EdgeColor',[0.85 0.85 0.85], 'LineWidth',1);
-uistack(hFrame,'top');
 
 h = struct();
 h.fig = gcf;
@@ -263,9 +293,45 @@ h.ax  = ax;
 h.nPoints = numel(X);
 h.timeBin = opt.TimeBin;
 h.timeWindow = R.timeWindows(opt.TimeBin,:);
+h.plotMode = plotMode;
+h.smoothSigmaPx = opt.SmoothSigmaPx;
+h.smoothFramePaddingPx = round(opt.SmoothFramePaddingPx);
+h.nRasterPoints = nRasterPoints;
+h.nCoveragePoints = numel(XCoverage);
+h.nCoverageRasterPoints = nCoverageRasterPoints;
+h.smoothField = smoothField;
+h.smoothWeight = smoothWeight;
+h.coverageWeight = coverageWeight;
+h.colorScaleValues = [];
+h.colorScaleRGB = [];
+if strcmp(plotMode, 'smoothed')
+    h.xLimits = displayXLim;
+    h.yLimits = displayYLim;
+    h.colorScaleValues = linspace(opt.ClipRange(1), opt.ClipRange(2), 301);
+    [scaleRGB, scaleAlpha] = valueToColorAlpha( ...
+        h.colorScaleValues(:), opt.AlphaMax, opt.AlphaThresh, opt.ClipRange);
+    scaleRGB = emphasize_smoothed_positive_red( ...
+        scaleRGB, h.colorScaleValues(:), opt.ClipRange);
+    scaleAlpha = min(opt.SmoothActivityAlphaGain .* scaleAlpha, 1);
+    scaleAlpha(abs(h.colorScaleValues(:)) <= opt.AlphaThresh) = 0;
+    scaleRGB = scaleAlpha .* scaleRGB + (1-scaleAlpha) .* ones(size(scaleRGB));
+    h.colorScaleRGB = reshape(uint8(round(255 .* scaleRGB)), ...
+        [1 numel(h.colorScaleValues) 3]);
+else
+    h.xLimits = xlim(ax);
+    h.yLimits = ylim(ax);
+end
 
 fprintf('Plotted %d activity points (time bin %d: %g-%g ms)\n', ...
     h.nPoints, opt.TimeBin, h.timeWindow(1), h.timeWindow(2));
+if strcmp(plotMode, 'smoothed')
+    fprintf(['Smoothed %d in-frame points with Gaussian sigma %.1f px, ' ...
+             'support fraction %.3g, and %d px frame padding.\n'], ...
+        nRasterPoints, opt.SmoothSigmaPx, opt.SmoothSupportFraction, ...
+        round(opt.SmoothFramePaddingPx));
+    fprintf('RF coverage: %d projected points, %d inside the display frame.\n', ...
+        h.nCoveragePoints, h.nCoverageRasterPoints);
+end
 
 end
 
@@ -279,6 +345,169 @@ if pos <= 4
 else
     comp = block*8 + (pos-4);
 end
+end
+
+% -------------------- Helper: project RF table rows --------------------
+function [x, y, keep] = project_table_rows(T, geom, onlyOnObjects)
+assign = string(T.assignment);
+x = nan(height(T),1);
+y = nan(height(T),1);
+
+idxT = (assign=="target") & ~isnan(T.along_GC);
+if any(idxT)
+    along = T.along_GC(idxT) * geom.widthEx;
+    perp  = T.perp_signed_GC(idxT) * geom.widthEx;
+    pT = geom.s_px + along.*geom.uT + perp.*geom.nT;
+    x(idxT) = pT(:,1);
+    y(idxT) = pT(:,2);
+end
+
+idxD = (assign=="distractor") & ~isnan(T.along_GC);
+if any(idxD)
+    along = T.along_GC(idxD) * geom.widthEx;
+    perp  = T.perp_signed_GC(idxD) * geom.widthEx;
+    pD = geom.s_px + along.*geom.uD + perp.*geom.nD;
+    x(idxD) = pD(:,1);
+    y(idxD) = pD(:,2);
+end
+
+idxB = (assign=="background") & ~isnan(T.r_s_GC);
+if any(idxB)
+    rPx = T.r_s_GC(idxB) * geom.widthEx;
+    frac = T.arc_frac_edge(idxB);
+    isInner = T.arc_isInner_edge(idxB);
+    rEff = max(rPx, geom.radEx + 1e-6);
+    delta = asin(min(1, geom.radEx ./ rEff));
+    alphaFree = geom.alphaEx - geom.sgn*(delta+delta);
+    alphaLongFree = geom.alphaLongEx + geom.sgn*(delta+delta);
+
+    beta = zeros(size(frac));
+    beta(isInner) = geom.sgn*delta(isInner) + ...
+        frac(isInner).*alphaFree(isInner);
+    beta(~isInner) = -geom.sgn*delta(~isInner) + ...
+        frac(~isInner).*alphaLongFree(~isInner);
+
+    cb = cos(beta);
+    sb = sin(beta);
+    vx = cb*geom.uD(1) - sb*geom.uD(2);
+    vy = sb*geom.uD(1) + cb*geom.uD(2);
+    pB = geom.s_px + [rPx.*vx, rPx.*vy];
+    x(idxB) = pB(:,1);
+    y(idxB) = pB(:,2);
+end
+
+if onlyOnObjects
+    keep = (assign=="target") | (assign=="distractor");
+else
+    keep = isfinite(x) & isfinite(y);
+end
+end
+
+% -------------------- Helper: smoothed image-space average --------------------
+function [zField, weightField, coverageWeight, rgbField, alphaField, ...
+        coverageAlpha, nValid, nCoverageValid, xLimits, yLimits] = ...
+        smooth_projected_field(X, Y, V, XCoverage, YCoverage, W, H, ...
+            sigmaPx, supportFraction, alphaMax, alphaThresh, clipRange, ...
+            activityAlphaGain, coverageAlphaMax, framePaddingPx)
+framePaddingPx = round(framePaddingPx);
+xLimits = [1-framePaddingPx, W+framePaddingPx];
+yLimits = [1-framePaddingPx, H+framePaddingPx];
+canvasW = W + 2*framePaddingPx;
+canvasH = H + 2*framePaddingPx;
+
+xi = round(double(X(:))) - xLimits(1) + 1;
+yi = round(double(Y(:))) - yLimits(1) + 1;
+v = double(V(:));
+valid = isfinite(xi) & isfinite(yi) & isfinite(v) & ...
+    xi >= 1 & xi <= canvasW & yi >= 1 & yi <= canvasH;
+nValid = nnz(valid);
+assert(nValid > 0, 'No finite projected samples fall inside the image frame.');
+
+xiCoverage = round(double(XCoverage(:))) - xLimits(1) + 1;
+yiCoverage = round(double(YCoverage(:))) - yLimits(1) + 1;
+validCoverage = isfinite(xiCoverage) & isfinite(yiCoverage) & ...
+    xiCoverage >= 1 & xiCoverage <= canvasW & ...
+    yiCoverage >= 1 & yiCoverage <= canvasH;
+nCoverageValid = nnz(validCoverage);
+assert(nCoverageValid > 0, ...
+    'No finite RF-coverage samples fall inside the image frame.');
+
+lin = sub2ind([canvasH canvasW], yi(valid), xi(valid));
+sumMap = reshape(accumarray( ...
+    lin, v(valid), [canvasH*canvasW 1], @sum, 0), [canvasH canvasW]);
+countMap = reshape(accumarray( ...
+    lin, 1, [canvasH*canvasW 1], @sum, 0), [canvasH canvasW]);
+linCoverage = sub2ind([canvasH canvasW], ...
+    yiCoverage(validCoverage), xiCoverage(validCoverage));
+coverageMap = reshape(accumarray( ...
+    linCoverage, 1, [canvasH*canvasW 1], @sum, 0), ...
+    [canvasH canvasW]);
+
+radius = max(1, ceil(3*sigmaPx));
+kx = -radius:radius;
+g = exp(-0.5 * (kx./sigmaPx).^2);
+g = g / sum(g);
+
+sumBlur = conv2(conv2(sumMap, g, 'same'), g', 'same');
+weightField = conv2(conv2(countMap, g, 'same'), g', 'same');
+coverageWeight = conv2(conv2(coverageMap, g, 'same'), g', 'same');
+zField = sumBlur ./ max(weightField, eps);
+zField = min(max(zField, clipRange(1)), clipRange(2));
+
+peakWeight = max(weightField(:));
+minWeight = supportFraction * peakWeight;
+support = weightField >= minWeight;
+zField(~support) = NaN;
+
+zForColor = zField;
+zForColor(~isfinite(zForColor)) = 0;
+[rgb, valueAlpha] = valueToColorAlpha( ...
+    zForColor(:), alphaMax, alphaThresh, clipRange);
+rgb = emphasize_smoothed_positive_red(rgb, zForColor(:), clipRange);
+rgbField = reshape(rgb, [canvasH canvasW 3]);
+valueAlpha = reshape(valueAlpha, [canvasH canvasW]);
+
+supportAlpha = (weightField - minWeight) ./ max(4*minWeight, eps);
+supportAlpha = min(max(supportAlpha, 0), 1);
+alphaField = activityAlphaGain .* valueAlpha .* supportAlpha;
+alphaField(abs(zForColor) <= alphaThresh) = 0;
+alphaField = min(alphaField, 1);
+alphaField(~support | ~isfinite(alphaField)) = 0;
+
+peakCoverageWeight = max(coverageWeight(:));
+minCoverageWeight = supportFraction * peakCoverageWeight;
+coverageSupport = coverageWeight >= minCoverageWeight;
+coverageAlpha = (coverageWeight - minCoverageWeight) ./ ...
+    max(4*minCoverageWeight, eps);
+coverageAlpha = coverageAlphaMax * min(max(coverageAlpha, 0), 1);
+coverageAlpha(~coverageSupport | ~isfinite(coverageAlpha)) = 0;
+end
+
+function rgb = emphasize_smoothed_positive_red(rgb, z, clipRange)
+% Keep the smoothed positive-response map red except near its upper limit.
+positive = z > 0;
+if ~any(positive)
+    return;
+end
+
+t = min(max(z(positive) ./ clipRange(2), 0), 1);
+deepRed = [0.72 0.00 0.00];
+brightRed = [1.00 0.10 0.04];
+yellow = [1.00 0.92 0.12];
+
+rgbPositive = zeros(nnz(positive), 3);
+redRange = t <= 0.8;
+redMix = t(redRange) ./ 0.8;
+rgbPositive(redRange,:) = ...
+    (1-redMix).*deepRed + redMix.*brightRed;
+
+highRange = ~redRange;
+if any(highRange)
+    highMix = (t(highRange)-0.8) ./ 0.2;
+    rgbPositive(highRange,:) = ...
+        (1-highMix).*brightRed + highMix.*yellow;
+end
+rgb(positive,:) = rgbPositive;
 end
 
 % -------------------- Helper: color/alpha mapping --------------------

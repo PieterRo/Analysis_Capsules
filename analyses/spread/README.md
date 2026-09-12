@@ -7,6 +7,8 @@ geometry of stimulus 38.
 
 ## Current entry scripts
 
+- `Visual_Response_Spread_V1_V4.m`: recommended entrypoint; runs both regions,
+  combines them into one two-panel figure, and saves `.fig` and `.png` output.
 - `Visual_Response_Spread_V1.m`: V1 channels 1:512.
 - `Visual_Response_Spread_V4.m`: V4 channels 513:768, mapped explicitly to
   local rows 1:256 in `Tall_V4_lines_N.mat`.
@@ -25,6 +27,22 @@ and make the projected activity figure.
 - RF/stimulus combinations on target, distractor, and background are shown
   (`onlyOnObjects = false`).
 - Overlap exclusion and T-D statistics follow the existing attention code.
+- Projected samples are displayed as a density-normalized Gaussian average
+  (`smoothSigmaPx = 15`) on a white background. The target capsule has a
+  solid outline and the distractor capsule a dashed outline; neither object
+  is filled. This smoothing changes only the visualization, not site
+  inclusion, normalization, or the underlying response values.
+- Neutral gray shows the projected coverage of all RFs in the selected
+  cortical region. The colored response overlay still uses only sites that
+  pass the established inclusion rule. Its display alpha is amplified by a
+  factor of 3 to make positive responses more clearly red; response values
+  themselves are unchanged. The smoothed display keeps positive values red
+  over most of the range and shifts toward yellow only near the upper limit.
+- The display includes 100 pixels of white padding around the original
+  stimulus frame so peripheral RF coverage remains visible. The solid target
+  and dashed distractor contours use a 4-pixel line width.
+- The combined figure includes a shared color scale for the normalized
+  response (`z`, clipped to -1 through 2). It is not an SNR scale.
 
 The site-inclusion mask is the union of:
 
@@ -74,6 +92,12 @@ V4:
 From the repository root in MATLAB:
 
 ```matlab
+run(fullfile('analyses', 'spread', 'Visual_Response_Spread_V1_V4.m'));
+```
+
+The individual panels can still be run separately:
+
+```matlab
 run(fullfile('analyses', 'spread', 'Visual_Response_Spread_V1.m'));
 run(fullfile('analyses', 'spread', 'Visual_Response_Spread_V4.m'));
 ```
@@ -87,6 +111,64 @@ fullfile(cfg.resultsDir, 'spread')
 
 This resolves to the Dropbox results tree configured by `config_local.m`.
 Generated figures and large result files should not be committed to Git.
+
+## Attentional-modulation spread
+
+`Attention_Modulation_Spread_V1_V4.m` is the recommended entrypoint for the
+combined V1/V4 attentional-modulation figure. The individual scripts are
+`Attention_Modulation_Spread_V1.m` and
+`Attention_Modulation_Spread_V4.m`.
+
+`Attention_Modulation_Spread_Activity_Inclusion_V1_V4.m` is a separate
+comparison analysis using the broader visual-activity inclusion mask instead
+of the attention-significance mask. This selects the same 209 V1 and 145 V4
+sites as the visually driven activity figure and saves to a distinct
+`*_activity_inclusion_*` output name. It does not overwrite the
+attention-significant version.
+
+The map uses the established 300-500 ms attention analysis and its fixed
+`pValueTD < 0.05` site mask, as in the attention movie. Unlike that movie,
+the spatial calculation includes target, distractor, and background RF
+locations. It uses the 192 target-swap pairs `[1 6]`, `[2 5]`, `[3 8]`, and
+`[4 7]` repeated in every block of eight. Only matched assignment pairs
+(target/distractor, distractor/target, or background/background) with the
+same RF-center color are included.
+
+For each directed pair, target and distractor first and second response
+moments are normalized per site using the established SNR response scale.
+The contribution is weighted by the smaller trial count of the two stimuli.
+After projection into the canonical stimulus-38 frame, the weighted moments
+are Gaussian-averaged (`sigma = 15 px`) and converted locally to:
+
+```text
+d' = (muTarget - muDistractor) /
+     sqrt(0.5 * (varTarget + varDistractor))
+```
+
+Red indicates target greater than distractor, blue indicates distractor
+greater than target, and neutral gray shows all-RF sampling coverage. The
+shared display range is `[-0.5 0.5]`; values near zero fade to the gray
+coverage layer. Background values are direct comparisons from matched
+background/background stimulus pairs, not copies of object-assigned d-prime.
+
+Validation on 2026-09-12 included 129/512 V1 sites and 55/256 V4 sites. The
+projected matched samples comprised 24,728 V1 and 13,512 V4 background
+locations, in addition to equal target and distractor sample counts. The
+supported field ranges were `[-0.2261 0.2266]` in V1 and
+`[-0.3366 0.3391]` in V4, so no supported pixels were clipped by the shared
+display range.
+
+This is a descriptive smoothed map. Demonstrating statistically significant
+modulation outside the object contours will require a separate spatial test
+or confidence interval that accounts for smoothing and repeated site/stimulus
+contributions.
+
+Run the combined attention map from the repository root:
+
+```matlab
+run(fullfile('analyses', 'spread', ...
+    'Attention_Modulation_Spread_V1_V4.m'));
+```
 
 ## Suggested next steps
 
