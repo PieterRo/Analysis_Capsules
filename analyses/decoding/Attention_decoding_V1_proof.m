@@ -3,8 +3,9 @@ function OUT = Attention_decoding_V1_proof(varargin)
 %
 % This is an in-sample proof-of-principle. Attention d-prime weights and
 % trial scores are estimated from the same day-1/2 data. For each trial,
-% sites whose RF centers lie on the target receive +d-prime and sites on
-% the distractor receive -d-prime. Background and overlap sites are omitted.
+% sites whose RF centers lie on or near the target receive +d-prime and
+% sites on or near the distractor receive -d-prime. Distant background and
+% overlap sites are omitted.
 
 p = inputParser;
 p.addParameter('SNRThreshold', 0.7, @(x) isnumeric(x) && isscalar(x));
@@ -16,6 +17,10 @@ p.addParameter('CovarianceShrinkage', 0.1, ...
     @(x) isnumeric(x) && isscalar(x) && x >= 0 && x <= 1);
 p.addParameter('MinSitesPerQuartet', 20, ...
     @(x) isnumeric(x) && isscalar(x) && x >= 0 && x == floor(x));
+p.addParameter('CurveMarginDeg', 0, ...
+    @(x) isnumeric(x) && isscalar(x) && isfinite(x) && x >= 0);
+p.addParameter('PixelsPerDegree', [], ...
+    @(x) isempty(x) || (isnumeric(x) && isscalar(x) && isfinite(x) && x > 0));
 p.addParameter('Days', [1 2], @(x) isnumeric(x) && isvector(x) && ~isempty(x));
 p.addParameter('OnlyCorrect', true, @(x) islogical(x) && isscalar(x));
 p.addParameter('ExcludeOverlap', true, @(x) islogical(x) && isscalar(x));
@@ -34,6 +39,25 @@ snrData = load(fullfile(cfg.matDir, 'SNR_V1_byColor_byWindow.mat'), 'SNR');
 Tall_V1 = geomData.Tall_V1;
 R3 = respData.R;
 SNR = snrData.SNR;
+
+if isempty(opt.PixelsPerDegree)
+    calibrationFile = fullfile(cfg.extrasRoot, 'monkeyN', 'RFs', ...
+        'BarMap_Nilson.mat');
+    calibrationData = load(calibrationFile, 'pixperdeg');
+    pixelsPerDegree = double(calibrationData.pixperdeg);
+else
+    calibrationFile = '';
+    pixelsPerDegree = double(opt.PixelsPerDegree);
+end
+curveMarginPx = opt.CurveMarginDeg * pixelsPerDegree;
+
+if opt.CurveMarginDeg > 0
+    coordData = load(fullfile(cfg.logsDir, ...
+        'ObjAtt_lines_monkeyN_20220201_B1.mat'), 'ALLCOORDS');
+    ALLCOORDS = coordData.ALLCOORDS;
+else
+    ALLCOORDS = [];
+end
 
 assert(numel(Tall_V1) == 384, 'Expected geometry for 384 stimuli.');
 assert(size(R3.meanAct, 2) == 384, 'Expected responses for 384 stimuli.');
@@ -71,6 +95,15 @@ fisherWeight = dprime ./ pooledAttentionSD;
 eligibleSites = find(eligibleSite);
 eligibleRank = zeros(512, 1);
 eligibleRank(eligibleSites) = 1:numel(eligibleSites);
+
+targetByStimulus = false(512, 384);
+distractorByStimulus = false(512, 384);
+overlapByStimulus = false(512, 384);
+for stimNum = 1:384
+    [targetByStimulus(:, stimNum), distractorByStimulus(:, stimNum), ...
+        overlapByStimulus(:, stimNum)] = curveAssignments( ...
+        Tall_V1(stimNum), ALLCOORDS, curveMarginPx);
+end
 
 dataDir = fullfile(cfg.dataRoot, 'Mr Nilson');
 m1 = matfile(fullfile(dataDir, 'ObjAtt_lines_normMUA.mat'));
@@ -140,15 +173,12 @@ for firstTrial = 1:opt.ChunkTrials:nTrials
     for jj = localTrials(:)'
         globalTrial = trialRange(jj);
         stimNum = stimPerTrial(globalTrial);
-        T = Tall_V1(stimNum).T;
-
-        assignment = string(T.assignment(1:512));
-        isTarget = assignment == "target";
-        isDistractor = assignment == "distractor";
+        isTarget = targetByStimulus(:, stimNum);
+        isDistractor = distractorByStimulus(:, stimNum);
         onCurve = isTarget | isDistractor;
 
-        if opt.ExcludeOverlap && ismember('overlap', T.Properties.VariableNames)
-            notOverlap = T.overlap(1:512) == 0;
+        if opt.ExcludeOverlap
+            notOverlap = ~overlapByStimulus(:, stimNum);
         else
             notOverlap = true(512, 1);
         end
@@ -203,14 +233,12 @@ fullDenominatorByStimulus = nan(384, 1);
 siteCountByStimulus = zeros(384, 1);
 
 for stimNum = 1:384
-    T = Tall_V1(stimNum).T;
-    assignment = string(T.assignment(1:512));
-    isTarget = assignment == "target";
-    isDistractor = assignment == "distractor";
+    isTarget = targetByStimulus(:, stimNum);
+    isDistractor = distractorByStimulus(:, stimNum);
     onCurve = isTarget | isDistractor;
 
-    if opt.ExcludeOverlap && ismember('overlap', T.Properties.VariableNames)
-        notOverlap = T.overlap(1:512) == 0;
+    if opt.ExcludeOverlap
+        notOverlap = ~overlapByStimulus(:, stimNum);
     else
         notOverlap = true(512, 1);
     end
@@ -300,6 +328,10 @@ OUT.covarianceWindowRequested = opt.CovarianceWindow;
 OUT.covarianceWindowSampled = ...
     [tb(covarianceSamples(1)), tb(covarianceSamples(end))];
 OUT.covarianceShrinkage = opt.CovarianceShrinkage;
+OUT.curveMarginDeg = opt.CurveMarginDeg;
+OUT.curveMarginPx = curveMarginPx;
+OUT.pixelsPerDegree = pixelsPerDegree;
+OUT.pixelCalibrationFile = calibrationFile;
 OUT.minSitesPerQuartet = opt.MinSitesPerQuartet;
 OUT.quartetSiteCount = quartetSiteCount;
 OUT.includedQuartet = find(quartetSiteCount >= opt.MinSitesPerQuartet);
@@ -353,6 +385,8 @@ fprintf('\nV1 attention proof-of-principle\n');
 fprintf('  Visually driven sites (bestSNR > %.2f): %d / 512\n', ...
     opt.SNRThreshold, nnz(visuallyDriven));
 fprintf('  Sites with a finite attention weight: %d / 512\n', nnz(eligibleSite));
+fprintf('  Curve margin: %.2f deg (%.2f px beyond the capsule edge)\n', ...
+    opt.CurveMarginDeg, curveMarginPx);
 fprintf('  Scored trials: %d / %d included (%d without eligible curve sites)\n', ...
     nScored, OUT.nIncluded, OUT.nWithoutFiniteScore);
 fprintf('  Minimum sites per quartet: %d (%d trials below threshold)\n', ...
@@ -413,10 +447,11 @@ if opt.MakeFigure
     grid on;
     set(gca, 'FontSize', 12, 'Layer', 'top');
 
-    sgtitle(sprintf(['Nilson V1 attention read-out, %g-%g ms; ' ...
+    sgtitle(sprintf(['Nilson V1 attention read-out, %g-%g ms; %.1f deg margin; ' ...
         'quartets with at least %d sites (N = %d)'], ...
         opt.ResponseWindow(1), opt.ResponseWindow(2), ...
-        opt.MinSitesPerQuartet, numel(OUT.includedQuartet)), ...
+        opt.CurveMarginDeg, opt.MinSitesPerQuartet, ...
+        numel(OUT.includedQuartet)), ...
         'FontWeight', 'bold');
     OUT.figure = fig;
 else
@@ -428,10 +463,12 @@ if opt.SaveOutputs
         mkdir(cfg.resultsDir);
     end
     thresholdLabel = sprintf('minSites%d', opt.MinSitesPerQuartet);
+    marginLabel = strrep(sprintf('%g', opt.CurveMarginDeg), '.', 'p');
+    analysisLabel = sprintf('margin%sdeg_%s', marginLabel, thresholdLabel);
     resultFile = fullfile(cfg.resultsDir, sprintf( ...
-        'Attention_decoder_V1_proof_%s_N.mat', thresholdLabel));
+        'Attention_decoder_V1_proof_%s_N.mat', analysisLabel));
     figureFile = fullfile(cfg.resultsDir, sprintf( ...
-        'Attention_decoder_V1_fisher_comparison_%s_N.png', thresholdLabel));
+        'Attention_decoder_V1_fisher_comparison_%s_N.png', analysisLabel));
     OUT.resultFile = resultFile;
     OUT.figureFile = figureFile;
 
@@ -470,4 +507,44 @@ else
     offsets = [3 4 7 8];
 end
 members = 8 * block + offsets;
+end
+
+function [isTarget, isDistractor, overlap] = curveAssignments( ...
+    stimulusGeometry, ALLCOORDS, marginPx)
+T = stimulusGeometry.T;
+assignment = string(T.assignment(1:512));
+isTarget = assignment == "target";
+isDistractor = assignment == "distractor";
+overlap = logical(T.overlap(1:512));
+
+if marginPx == 0
+    return;
+end
+
+fieldName = sprintf('stim_%d', stimulusGeometry.stimNum);
+coords = ALLCOORDS.(fieldName);
+toPx = @(point) [point(1) + 512, 384 - point(2)];
+s = toPx(double(coords.s(:))');
+tTarget = toPx(double(coords.t_fig(:))');
+tDistractor = toPx(double(coords.t_back(:))');
+radiusPx = double(stimulusGeometry.widthPx) / 2 + marginPx;
+points = [double(T.x_px(1:512)), double(T.y_px(1:512))];
+
+isTarget = pointSegmentDistance(points, s, tTarget) <= radiusPx;
+isDistractor = pointSegmentDistance(points, s, tDistractor) <= radiusPx;
+overlap = isTarget & isDistractor;
+end
+
+function distance = pointSegmentDistance(points, segmentStart, segmentEnd)
+segment = segmentEnd - segmentStart;
+segmentLengthSquared = sum(segment .^ 2);
+if segmentLengthSquared == 0
+    projection = repmat(segmentStart, size(points, 1), 1);
+else
+    fraction = ((points - segmentStart) * segment') / segmentLengthSquared;
+    fraction = max(0, min(1, fraction));
+    projection = segmentStart + fraction .* segment;
+end
+distance = hypot(points(:, 1) - projection(:, 1), ...
+    points(:, 2) - projection(:, 2));
 end
