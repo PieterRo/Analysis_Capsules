@@ -23,6 +23,8 @@ p.addParameter('PixelsPerDegree', [], ...
     @(x) isempty(x) || (isnumeric(x) && isscalar(x) && isfinite(x) && x > 0));
 p.addParameter('ResponseCentering', 'global', ...
     @(x) ischar(x) || (isstring(x) && isscalar(x)));
+p.addParameter('AttentionPThreshold', Inf, ...
+    @(x) isnumeric(x) && isscalar(x) && x > 0 && ~isnan(x));
 p.addParameter('Days', [1 2], @(x) isnumeric(x) && isvector(x) && ~isempty(x));
 p.addParameter('OnlyCorrect', true, @(x) islogical(x) && isscalar(x));
 p.addParameter('ExcludeOverlap', true, @(x) islogical(x) && isscalar(x));
@@ -94,7 +96,12 @@ responseScale(~isfinite(responseScale) | responseScale <= 0) = NaN;
 hasWeight = attention.validSite(:) & isfinite(dprime) & ...
     isfinite(responseMidpoint) & isfinite(responseScale) & ...
     isfinite(pooledAttentionSD) & pooledAttentionSD > 0;
-eligibleSite = visuallyDriven & hasWeight;
+passesAttentionP = true(size(hasWeight));
+if isfinite(opt.AttentionPThreshold)
+    passesAttentionP = isfinite(attention.pValueTD(:)) & ...
+        attention.pValueTD(:) < opt.AttentionPThreshold;
+end
+eligibleSite = visuallyDriven & hasWeight & passesAttentionP;
 fisherWeight = dprime ./ pooledAttentionSD;
 eligibleSites = find(eligibleSite);
 eligibleRank = zeros(512, 1);
@@ -338,6 +345,8 @@ OUT.covarianceWindowSampled = ...
     [tb(covarianceSamples(1)), tb(covarianceSamples(end))];
 OUT.covarianceShrinkage = opt.CovarianceShrinkage;
 OUT.responseCentering = responseCentering;
+OUT.attentionPThreshold = opt.AttentionPThreshold;
+OUT.attentionPValue = attention.pValueTD(:);
 OUT.quartetMeanResponse = quartetMeanResponse;
 OUT.quartetMeanTrialCount = quartetMeanTrialCount;
 OUT.curveMarginDeg = opt.CurveMarginDeg;
@@ -396,7 +405,14 @@ OUT.accuracyFullFisher = accuracyFullFisher;
 fprintf('\nV1 attention proof-of-principle\n');
 fprintf('  Visually driven sites (bestSNR > %.2f): %d / 512\n', ...
     opt.SNRThreshold, nnz(visuallyDriven));
-fprintf('  Sites with a finite attention weight: %d / 512\n', nnz(eligibleSite));
+fprintf('  Eligible sites after visual/attention selection: %d / 512\n', ...
+    nnz(eligibleSite));
+if isfinite(opt.AttentionPThreshold)
+    fprintf('  Site-level attention selection: p < %.3g\n', ...
+        opt.AttentionPThreshold);
+else
+    fprintf('  Site-level attention selection: none\n');
+end
 fprintf('  Response centering: %s\n', responseCentering);
 fprintf('  Curve margin: %.2f deg (%.2f px beyond the capsule edge)\n', ...
     opt.CurveMarginDeg, curveMarginPx);
@@ -460,11 +476,16 @@ if opt.MakeFigure
     grid on;
     set(gca, 'FontSize', 12, 'Layer', 'top');
 
-    sgtitle(sprintf(['Nilson V1 attention read-out, %s-centered, %g-%g ms; ' ...
+    if isfinite(opt.AttentionPThreshold)
+        pTitle = sprintf('attention p < %.3g; ', opt.AttentionPThreshold);
+    else
+        pTitle = '';
+    end
+    sgtitle(sprintf(['Nilson V1 attention read-out, %s-centered, %g-%g ms; %s' ...
         '%.1f deg margin; ' ...
         'quartets with at least %d sites (N = %d)'], ...
         responseCentering, opt.ResponseWindow(1), opt.ResponseWindow(2), ...
-        opt.CurveMarginDeg, opt.MinSitesPerQuartet, ...
+        pTitle, opt.CurveMarginDeg, opt.MinSitesPerQuartet, ...
         numel(OUT.includedQuartet)), ...
         'FontWeight', 'bold');
     OUT.figure = fig;
@@ -481,6 +502,10 @@ if opt.SaveOutputs
     analysisLabel = sprintf('margin%sdeg_%s', marginLabel, thresholdLabel);
     if strcmp(responseCentering, 'quartet')
         analysisLabel = sprintf('%s_quartetCentered', analysisLabel);
+    end
+    if isfinite(opt.AttentionPThreshold)
+        pLabel = strrep(sprintf('%g', opt.AttentionPThreshold), '.', 'p');
+        analysisLabel = sprintf('%s_p%s', analysisLabel, pLabel);
     end
     resultFile = fullfile(cfg.resultsDir, sprintf( ...
         'Attention_decoder_V1_proof_%s_N.mat', analysisLabel));
