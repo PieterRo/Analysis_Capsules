@@ -8,6 +8,9 @@ function OUT = Color_decoding_elastic_net_CV_V1_V4(varargin)
 % comes from Tall(stim).T.center_color, not ALLMAT.
 
 p = inputParser;
+p.addParameter('ResponseWindow', [300 500], ...
+    @(x) isnumeric(x) && isequal(size(x), [1 2]) && ...
+    all(isfinite(x)) && x(1) < x(2));
 p.addParameter('AlphaGrid', [0.1 0.25 0.5 0.75 1], ...
     @(x) isnumeric(x) && isvector(x) && all(isfinite(x)) && ...
     all(x > 0) && all(x <= 1));
@@ -23,6 +26,8 @@ p.addParameter('RandomSeed', 140926, ...
     @(x) isnumeric(x) && isscalar(x) && isfinite(x));
 p.addParameter('CoefficientTolerance', 1e-8, ...
     @(x) isnumeric(x) && isscalar(x) && isfinite(x) && x >= 0);
+p.addParameter('ChunkTrials', 100, ...
+    @(x) isnumeric(x) && isscalar(x) && x >= 1 && x == floor(x));
 p.addParameter('SaveOutputs', true, @(x) islogical(x) && isscalar(x));
 p.addParameter('MakeFigure', true, @(x) islogical(x) && isscalar(x));
 p.parse(varargin{:});
@@ -42,7 +47,7 @@ OUT.classDefinition = ['Yellow target (positions 5:8 within each ' ...
     'eight-stimulus block) is +1; purple target (positions 1:4) is -1.'];
 OUT.colorSource = 'Tall_(region)_lines_N.mat: T.center_color';
 OUT.responseCentering = 'training-fold quartet means';
-OUT.responseWindow = base.responseWindow;
+OUT.responseWindow = double(opt.ResponseWindow);
 OUT.curveMarginDeg = base.curveMarginDeg;
 OUT.minSitesPerQuartet = base.minSitesPerQuartet;
 OUT.alphaGrid = opt.AlphaGrid;
@@ -54,8 +59,10 @@ OUT.randomSeed = opt.RandomSeed;
 OUT.selectionRule = ['Sparsest alpha/lambda combination within one standard ' ...
     'error of the highest mean cross-validated accuracy.'];
 
-colorV1 = prepareColorFeatures(base.V1, 'V1', cfg);
-colorV4 = prepareColorFeatures(base.V4, 'V4', cfg);
+colorV1 = prepareColorFeatures(base.V1, 'V1', cfg, ...
+    OUT.responseWindow, opt.ChunkTrials);
+colorV4 = prepareColorFeatures(base.V4, 'V4', cfg, ...
+    OUT.responseWindow, opt.ChunkTrials);
 OUT.V1 = crossValidateRegion(colorV1, opt, opt.RandomSeed + 1000);
 OUT.V4 = crossValidateRegion(colorV4, opt, opt.RandomSeed + 2000);
 
@@ -64,10 +71,9 @@ if opt.MakeFigure
     fig = makeFigure(OUT);
 end
 
-resultFile = fullfile(cfg.resultsDir, ...
-    'Color_decoder_elastic_net_CV_V1_V4_quartetCentered_minSites20_N.mat');
-figureFile = fullfile(cfg.resultsDir, ...
-    'Color_decoder_elastic_net_CV_V1_V4_quartetCentered_minSites20_N.png');
+fileStem = resultFileStem(OUT.responseWindow);
+resultFile = fullfile(cfg.resultsDir, [fileStem '.mat']);
+figureFile = fullfile(cfg.resultsDir, [fileStem '.png']);
 OUT.resultFile = resultFile;
 OUT.figureFile = figureFile;
 
@@ -107,7 +113,7 @@ if needsRebuild
 end
 end
 
-function D = prepareColorFeatures(source, region, cfg)
+function D = prepareColorFeatures(source, region, cfg, responseWindow, chunkTrials)
 switch region
     case 'V1'
         tallData = load(fullfile(cfg.matDir, ...
@@ -160,6 +166,9 @@ assignmentRole = assignmentRoleByStimulus(:, stimulus)';
 validateColorRole(canonicalColorSign, assignmentRole, availability, region);
 
 D = source;
+D.normalizedResponse = readNormalizedResponses( ...
+    source, cfg, responseWindow, chunkTrials);
+D.responseWindowRequested = responseWindow;
 D.classLabel = classLabel;
 D.colorRole = colorRole;
 D.canonicalSign = canonicalColorSign;
@@ -185,8 +194,65 @@ assert(all(isfinite(D.featureMatrix(:))), ...
     '%s color feature matrix contains non-finite values.', region);
 
 fprintf(['%s color features: %d trials, %d quartets, %d candidate sites; ' ...
-    'labels from Tall center_color.\n'], region, numel(classLabel), ...
-    numel(unique(D.quartet)), size(D.featureMatrix, 2));
+    'labels from Tall center_color; window %g-%g ms.\n'], ...
+    region, numel(classLabel), numel(unique(D.quartet)), ...
+    size(D.featureMatrix, 2), responseWindow(1), responseWindow(2));
+end
+
+function normalizedResponse = readNormalizedResponses( ...
+        source, cfg, responseWindow, chunkTrials)
+dataDir = fullfile(cfg.dataRoot, 'Mr Nilson');
+m1 = matfile(fullfile(dataDir, 'ObjAtt_lines_normMUA.mat'));
+m2 = matfile(fullfile(dataDir, 'ObjAtt_lines_MUA_trials.mat'));
+tb = double(m2.tb);
+tb = tb(:)';
+timeMask = tb >= responseWindow(1) & tb <= responseWindow(2);
+timeSamples = find(timeMask);
+assert(~isempty(timeSamples), ...
+    'Response window %g-%g ms does not overlap tb.', ...
+    responseWindow(1), responseWindow(2));
+
+trialIndex = double(source.trialIndex(:));
+globalSites = double(source.siteIndexGlobal(:));
+localSites = double(source.siteIndexLocal(:));
+switch source.region
+    case 'V1'
+        regionSites = 1:512;
+    case 'V4'
+        regionSites = 513:768;
+    otherwise
+        error('Unknown region %s.', source.region);
+end
+assert(isequal(globalSites, regionSites(localSites)'), ...
+    '%s local/global site mapping is inconsistent.', source.region);
+baseline = double(source.baseline(localSites));
+responseScale = double(source.responseScale(localSites));
+nTrials = numel(trialIndex);
+nSites = numel(globalSites);
+nRegionSites = numel(regionSites);
+[~, nAllTrials, ~] = size(m1, 'normMUA');
+rowByGlobalTrial = zeros(nAllTrials, 1);
+rowByGlobalTrial(trialIndex) = 1:nTrials;
+normalizedResponse = nan(nTrials, nSites);
+
+for firstGlobalTrial = 1:chunkTrials:nAllTrials
+    lastGlobalTrial = min(nAllTrials, firstGlobalTrial + chunkTrials - 1);
+    globalRange = firstGlobalTrial:lastGlobalTrial;
+    selected = rowByGlobalTrial(globalRange) > 0;
+    if ~any(selected)
+        continue;
+    end
+    rows = rowByGlobalTrial(globalRange(selected));
+    raw = double(m1.normMUA(regionSites, globalRange, timeSamples));
+    trialResponse = reshape(mean(raw, 3, 'omitnan'), ...
+        nRegionSites, numel(globalRange));
+    trialResponse = trialResponse(localSites, :);
+    normalized = (trialResponse - baseline) ./ responseScale;
+    normalizedResponse(rows, :) = normalized(:, selected)';
+end
+
+assert(all(any(isfinite(normalizedResponse), 2)), ...
+    'Some selected trials have no finite responses in the requested window.');
 end
 
 function validateComplementColors(colorRoleByStimulus, region)
@@ -483,8 +549,9 @@ ylabel('Nonzero sites in final fit');
 title('Final decoder population');
 formatAxes(gca);
 
-sgtitle(sprintf(['Nilson elastic-net color decoder: %dx%d-fold ' ...
-    'quartet-balanced cross-validation'], OUT.numRepeats, OUT.numFolds), ...
+sgtitle(sprintf(['Nilson elastic-net color decoder, %g-%g ms: %dx%d-fold ' ...
+    'quartet-balanced cross-validation'], OUT.responseWindow(1), ...
+    OUT.responseWindow(2), OUT.numRepeats, OUT.numFolds), ...
     'FontWeight', 'bold');
 end
 
@@ -513,6 +580,16 @@ function formatAxes(ax)
 grid(ax, 'on');
 box(ax, 'off');
 set(ax, 'FontSize', 11, 'Layer', 'top');
+end
+
+function stem = resultFileStem(responseWindow)
+stem = 'Color_decoder_elastic_net_CV_V1_V4';
+if ~isequal(responseWindow, [300 500])
+    windowText = sprintf('_%gto%gms', responseWindow(1), responseWindow(2));
+    windowText = strrep(windowText, '.', 'p');
+    stem = [stem windowText];
+end
+stem = [stem '_quartetCentered_minSites20_N'];
 end
 
 function printSummary(OUT)
