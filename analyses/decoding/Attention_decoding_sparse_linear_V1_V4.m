@@ -183,6 +183,8 @@ nTrials = numel(trialIndex);
 nEligible = numel(eligibleSite);
 featureMatrix = zeros(nTrials, nEligible);
 availability = false(nTrials, nEligible);
+normalizedResponseByTrial = nan(nTrials, nEligible);
+canonicalSignByTrial = zeros(nTrials, nEligible);
 [~, nAllTrials, ~] = size(m1, 'normMUA');
 rowByGlobalTrial = zeros(nAllTrials, 1);
 rowByGlobalTrial(trialIndex) = 1:nTrials;
@@ -209,6 +211,8 @@ for firstGlobalTrial = 1:chunkTrials:nAllTrials
     features(~active) = 0;
     featureMatrix(rows, :) = features(eligibleSite, :)';
     availability(rows, :) = active(eligibleSite, :)';
+    normalizedResponseByTrial(rows, :) = normalized(eligibleSite, :)';
+    canonicalSignByTrial(rows, :) = signs(eligibleSite, :)';
 end
 
 nSitesUsed = sum(availability, 2);
@@ -219,6 +223,8 @@ variablePredictor = any(availability, 1) & ...
     std(featureMatrix, 0, 1) > 0;
 featureMatrix = featureMatrix(:, variablePredictor);
 availability = availability(:, variablePredictor);
+normalizedResponseByTrial = normalizedResponseByTrial(:, variablePredictor);
+canonicalSignByTrial = canonicalSignByTrial(:, variablePredictor);
 eligibleSite = eligibleSite(variablePredictor);
 
 assert(all(isfinite(featureMatrix(:))), ...
@@ -237,6 +243,8 @@ D.siteIndexLocal = eligibleSite;
 D.siteIndexGlobal = globalSites(eligibleSite);
 D.featureMatrix = featureMatrix;
 D.availability = availability;
+D.normalizedResponse = normalizedResponseByTrial;
+D.canonicalSign = canonicalSignByTrial;
 D.nSitesUsed = sum(availability, 2);
 D.quartetMeanResponse = quartetMean;
 D.responseScale = responseScale;
