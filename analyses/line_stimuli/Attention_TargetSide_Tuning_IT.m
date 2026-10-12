@@ -51,6 +51,7 @@ if nargin >= 1 && ~isempty(Puser)
 end
 
 cfg = config();
+if isfield(P, 'Config'); cfg = P.Config; end
 
 %% Monkey-specific files
 if P.Monkey == 1

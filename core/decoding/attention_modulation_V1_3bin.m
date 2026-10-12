@@ -4,12 +4,12 @@ function OUT = attention_modulation_V1_3bin(DATA, Tall_V1, SNR, opts)
 % using 3 time bins and focusing on timeIdx=3 (300–500 ms) by default.
 %
 % DATA must contain:
-%   DATA.meanAct    [nSites x 384 x 3]  or [1024 x 384 x 3]
-%   DATA.meanSqAct  [nSites x 384 x 3]
-%   DATA.nTrials    [1 x 384] or [384 x 1] or [nSites x 384]
+%   DATA.meanAct    [nSites x nStim x 3] or [1024 x nStim x 3]
+%   DATA.meanSqAct  [nSites x nStim x 3]
+%   DATA.nTrials    [1 x nStim] or [nStim x 1] or [nSites x nStim]
 %   DATA.timeWindows [3 x 2] optional
 %
-% Tall_V1: 1x384 struct array. For each stimulus:
+% Tall_V1: struct array with one entry per stimulus. For each stimulus:
 %   Tall_V1(stim).T is a table with >=512 rows and fields:
 %     - assignment   : 'target'/'distractor'/'background'
 %     - overlap      : 0/1  (optional; if missing assumed 0)
@@ -36,7 +36,7 @@ function OUT = attention_modulation_V1_3bin(DATA, Tall_V1, SNR, opts)
 %   OUT.wY, OUT.wP (effective matched weights per color)
 %   OUT.validSite (logical)
 %   OUT.timeWindowUsed [1x2]
-%   OUT.stimMaskUsed [1x384]
+%   OUT.stimMaskUsed [1 x nStim]
 
 %% Options
 if nargin < 4, opts = struct(); end
@@ -57,23 +57,24 @@ if ~isempty(opts.debugSite)
     dbgRow = find(v1Sites == opts.debugSite, 1, 'first');
 end
 
-% Stimulus subset selection: either stimMask (logical 1x384) or stimIdx (indices).
-stimMask = true(1,384);
+nStim = numel(Tall_V1);
+% Stimulus subset selection: either stimMask or stimIdx.
+stimMask = true(1,nStim);
 if ~isempty(opts.stimMask)
-    if ~(islogical(opts.stimMask) && numel(opts.stimMask) == 384)
-        error('opts.stimMask must be a logical vector with 384 elements.');
+    if ~(islogical(opts.stimMask) && numel(opts.stimMask) == nStim)
+        error('opts.stimMask must be a logical vector with %d elements.', nStim);
     end
-    stimMask = reshape(opts.stimMask, 1, 384);
+    stimMask = reshape(opts.stimMask, 1, nStim);
 end
 if ~isempty(opts.stimIdx)
     if ~(isnumeric(opts.stimIdx) && isvector(opts.stimIdx))
-        error('opts.stimIdx must be a numeric vector of stimulus indices (1..384).');
+        error('opts.stimIdx must be a numeric vector of stimulus indices.');
     end
     idx = opts.stimIdx(:)';
-    if any(idx < 1 | idx > 384 | idx ~= floor(idx))
+    if any(idx < 1 | idx > nStim | idx ~= floor(idx))
         error('opts.stimIdx contains invalid stimulus indices.');
     end
-    tmp = false(1,384);
+    tmp = false(1,nStim);
     tmp(idx) = true;
     stimMask = stimMask & tmp;
 end
@@ -91,23 +92,26 @@ end
 %% Validate inputs
 assert(isfield(DATA,'meanAct') && isfield(DATA,'meanSqAct') && isfield(DATA,'nTrials'), ...
     'DATA must contain meanAct, meanSqAct, nTrials.');
-assert(numel(Tall_V1) == 384, 'Tall_V1 must be 1x384.');
+assert(nStim > 0, 'Tall_V1 must contain stimulus geometry.');
 
 meanAct   = DATA.meanAct;
 meanSqAct = DATA.meanSqAct;
 
-assert(size(meanAct,2) == 384 && size(meanSqAct,2) == 384, 'Expected 384 stimuli.');
+assert(size(meanAct,2) == nStim && size(meanSqAct,2) == nStim, ...
+    'Response and geometry stimulus counts differ.');
 assert(size(meanAct,3) >= timeIdx && size(meanSqAct,3) >= timeIdx, 'opts.timeIdx out of range.');
 
 nTrials = DATA.nTrials;
 if isvector(nTrials)
-    nTrials = nTrials(:)'; % 1x384
-    assert(numel(nTrials) == 384, 'DATA.nTrials vector must have 384 elements.');
+    nTrials = nTrials(:)';
+    assert(numel(nTrials) == nStim, ...
+        'DATA.nTrials vector must have %d elements.', nStim);
     perSiteTrials = false;
-elseif ismatrix(nTrials) && size(nTrials,2)==384
+elseif ismatrix(nTrials) && size(nTrials,2)==nStim
     perSiteTrials = true;
 else
-    error('DATA.nTrials must be vector(384) or matrix(nSites x 384).');
+    error('DATA.nTrials must be vector(%d) or matrix(nSites x %d).', ...
+        nStim, nStim);
 end
 
 %% Build normalization constants (V1 sites)
@@ -132,11 +136,12 @@ sumY_DY  = zeros(nV1,1); sumY2_DY = zeros(nV1,1); N_DY = zeros(nV1,1);
 sumY_DP  = zeros(nV1,1); sumY2_DP = zeros(nV1,1); N_DP = zeros(nV1,1);
 
 if opts.verbose
-    fprintf('V1 attention modulation: timeIdx=%d over 384 stimuli...\n', timeIdx);
+    fprintf('V1 attention modulation: timeIdx=%d over %d stimuli...\n', ...
+        timeIdx, nStim);
 end
 
 %% Main loop over stimuli
-for stim = 1:384
+for stim = 1:nStim
     if ~stimMask(stim)
         continue;
     end

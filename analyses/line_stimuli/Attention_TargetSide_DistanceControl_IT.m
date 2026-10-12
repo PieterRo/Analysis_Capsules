@@ -33,6 +33,7 @@ if nargin >= 1 && ~isempty(Puser)
 end
 
 cfg = config();
+if isfield(P, 'Config'); cfg = P.Config; end
 
 if P.Monkey == 1
     monkeySuffix = "N";
@@ -94,7 +95,8 @@ if hasSessionExclusions
     BASE = Attention_TargetSide_Tuning_IT(struct( ...
         'makeSummaryFigures', false, ...
         'makeExampleFigures', false, ...
-        'makeAngleReferenceFigure', false));
+        'makeAngleReferenceFigure', false, ...
+        'Monkey', P.Monkey, 'Config', cfg));
 else
     assert(exist(basePath, 'file') == 2, ...
         'Missing %s. Run Attention_TargetSide_Tuning_IT first.', basePath);
